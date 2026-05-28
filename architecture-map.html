@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>DE-code X — How We Read Your Repository</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: #080808; color: #e4e4e7; font-family: 'Inter', system-ui, sans-serif; overflow: hidden; }
+
+  /* ── Top bar ── */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    height: 52px; background: rgba(0,0,0,0.85); border-bottom: 1px solid rgba(255,255,255,0.06);
+    backdrop-filter: blur(12px);
+    display: flex; align-items: center; gap: 16px; padding: 0 20px;
+  }
+  #topbar .logo { font-size: 13px; font-weight: 600; letter-spacing: 0.12em; color: #a1a1aa; white-space: nowrap; }
+  #topbar .sep { width: 1px; height: 20px; background: rgba(255,255,255,0.08); }
+  #topbar .title { font-size: 12px; color: #52525b; }
+  #chips { display: flex; gap: 6px; margin-left: auto; }
+  .chip {
+    padding: 4px 12px; border-radius: 999px; font-size: 11px; font-weight: 500; cursor: pointer;
+    border: 1px solid rgba(255,255,255,0.08); background: transparent; color: #71717a;
+    transition: all 0.15s;
+  }
+  .chip:hover { color: #d4d4d8; border-color: rgba(255,255,255,0.15); }
+  .chip.active { background: rgba(255,255,255,0.06); color: #e4e4e7; border-color: rgba(255,255,255,0.18); }
+  #zoom-controls { display: flex; gap: 4px; margin-left: 12px; }
+  .zbtn {
+    width: 28px; height: 28px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);
+    background: transparent; color: #71717a; font-size: 16px; cursor: pointer; display: grid; place-items: center;
+    transition: all 0.15s;
+  }
+  .zbtn:hover { color: #d4d4d8; border-color: rgba(255,255,255,0.2); }
+
+  /* ── Canvas ── */
+  #canvas-wrap {
+    position: fixed; top: 52px; left: 0; right: 0; bottom: 0;
+    overflow: hidden; cursor: grab;
+  }
+  #canvas-wrap:active { cursor: grabbing; }
+  #svg-root { display: block; user-select: none; }
+
+  /* ── Sidebar ── */
+  #sidebar {
+    position: fixed; right: 0; top: 52px; bottom: 0; width: 280px; z-index: 90;
+    background: rgba(8,8,8,0.92); border-left: 1px solid rgba(255,255,255,0.06);
+    backdrop-filter: blur(12px); display: flex; flex-direction: column;
+    transition: transform 0.25s ease;
+  }
+  #sidebar.hidden { transform: translateX(100%); }
+  #sidebar-header {
+    padding: 16px; border-bottom: 1px solid rgba(255,255,255,0.06);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  #sidebar-header span { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; color: #52525b; text-transform: uppercase; }
+  #sidebar-close { background: none; border: none; color: #52525b; cursor: pointer; font-size: 18px; line-height: 1; }
+  #sidebar-close:hover { color: #a1a1aa; }
+  #sidebar-body { flex: 1; overflow-y: auto; padding: 12px 16px 24px; }
+  .finding {
+    padding: 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.05);
+    background: rgba(255,255,255,0.02); margin-bottom: 8px;
+  }
+  .finding-num { font-size: 10px; color: #3f3f46; font-weight: 700; margin-bottom: 4px; }
+  .finding p { font-size: 11.5px; color: #71717a; line-height: 1.6; }
+  .finding strong { color: #a1a1aa; }
+
+  /* ── Node tooltip ── */
+  #tooltip {
+    position: fixed; z-index: 200; pointer-events: none;
+    max-width: 260px; background: #18181b; border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px; padding: 12px 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+    opacity: 0; transition: opacity 0.12s;
+  }
+  #tooltip.show { opacity: 1; }
+  #tooltip .t-label { font-size: 12px; font-weight: 600; color: #e4e4e7; margin-bottom: 2px; }
+  #tooltip .t-file  { font-size: 10px; color: #52525b; margin-bottom: 6px; font-family: monospace; }
+  #tooltip .t-role  { font-size: 11px; color: #a1a1aa; line-height: 1.5; margin-bottom: 4px; }
+  #tooltip .t-note  { font-size: 10px; color: #3f3f46; line-height: 1.4; }
+  #tooltip .t-badge {
+    display: inline-block; margin-top: 6px;
+    padding: 2px 8px; border-radius: 999px; font-size: 9.5px; font-weight: 600; letter-spacing: 0.05em;
+  }
+  .badge-critical { background: rgba(239,68,68,0.15); color: #f87171; }
+  .badge-data     { background: rgba(59,130,246,0.15); color: #60a5fa; }
+  .badge-type     { background: rgba(168,85,247,0.15); color: #c084fc; }
+  .badge-service  { background: rgba(16,185,129,0.15); color: #34d399; }
+  .badge-external { background: rgba(245,158,11,0.15); color: #fbbf24; }
+
+  /* ── Legend ── */
+  #legend {
+    position: fixed; bottom: 20px; left: 20px; z-index: 90;
+    background: rgba(8,8,8,0.85); border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px; padding: 12px 16px; backdrop-filter: blur(8px);
+  }
+  .leg-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 10.5px; color: #52525b; }
+  .leg-row:last-child { margin-bottom: 0; }
+  .leg-line { width: 24px; height: 2px; border-radius: 1px; }
+  .leg-dot  { width: 8px; height: 8px; border-radius: 50%; }
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div id="topbar">
+  <span class="logo">DE-code X</span>
+  <div class="sep"></div>
+  <span class="title">How we read your repository</span>
+  <div id="chips">
+    <button class="chip active" data-filter="all">Overview</button>
+    <button class="chip" data-filter="domain">Domain Pipeline</button>
+    <button class="chip" data-filter="system">System Pipeline</button>
+    <button class="chip" data-filter="critical">Critical Path</button>
+  </div>
+  <div id="zoom-controls">
+    <button class="zbtn" id="zoom-in">+</button>
+    <button class="zbtn" id="zoom-out">−</button>
+    <button class="zbtn" id="zoom-reset" style="font-size:11px;width:36px">fit</button>
+  </div>
+  <button class="zbtn" id="sidebar-toggle" style="width:auto;padding:0 10px;font-size:11px;margin-left:4px;">findings</button>
+</div>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <span>Notable Findings</span>
+    <button id="sidebar-close">×</button>
+  </div>
+  <div id="sidebar-body">
+    <div class="finding">
+      <div class="finding-num">01</div>
+      <p><strong>Parallel execution in route.ts</strong> — <code>Promise.all([fetchRepoTree, getOrBuildSystemMap])</code> runs the domain and system pipelines simultaneously. Neither waits for the other.</p>
+    </div>
+    <div class="finding">
+      <div class="finding-num">02</div>
+      <p><strong>55 prefix entries, sorted longest-first.</strong> DOMAIN_PREFIXES uses longest-match-wins: <code>src/server/auth</code> matches before <code>src/server</code>. Order in the array is intentional.</p>
+    </div>
+    <div class="finding">
+      <div class="finding-num">03</div>
+      <p><strong>"Source-confirmed" ≠ semantically understood.</strong> Strong evidence means a keyword matched near a filename in the GitHub tree blob list — not that the file was parsed or its logic was analysed.</p>
+    </div>
+    <div class="finding">
+      <div class="finding-num">04</div>
+      <p><strong>Two different cache TTLs.</strong> System map: <strong>60-min</strong> in-process. Repo tree: <strong>10-min</strong> in-process. Both reset every serverless cold-start — no persistence between deployments.</p>
+    </div>
+    <div class="finding">
+      <div class="finding-num">05</div>
+      <p><strong>v1 reserved fields are always null.</strong> <code>integrityScore</code>, <code>trustBoundaryNote</code>, and <code>weakSeams</code> are typed but never populated — placeholders for v2 import-chain analysis.</p>
+    </div>
+    <div class="finding">
+      <div class="finding-num">06</div>
+      <p><strong>~70 npm packages mapped to 8 systems.</strong> PACKAGE_SIGNALS covers @clerk/nextjs → Auth, prisma → Database, openai → AI Orchestration, stripe → Payments, and more.</p>
+    </div>
+    <div class="finding">
+      <div class="finding-num">07</div>
+      <p><strong>GitHub token never leaves the server.</strong> The API route fetches with the user's decrypted token (AES-256-GCM) server-side. The response JSON contains only tree data — no credentials.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Canvas -->
+<div id="canvas-wrap">
+<svg id="svg-root" xmlns="http://www.w3.org/2000/svg" width="2400" height="1080">
+<defs>
+  <!-- arrowhead markers -->
+  <marker id="arr-crit" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L8,3 z" fill="#ef4444" opacity="0.8"/>
+  </marker>
+  <marker id="arr-norm" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L8,3 z" fill="#3f3f46" opacity="0.8"/>
+  </marker>
+  <marker id="arr-domain" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L8,3 z" fill="#0ea5e9" opacity="0.7"/>
+  </marker>
+  <marker id="arr-system" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+    <path d="M0,0 L0,6 L8,3 z" fill="#8b5cf6" opacity="0.7"/>
+  </marker>
+  <!-- glow filter -->
+  <filter id="glow-crit" x="-50%" y="-50%" width="200%" height="200%">
+    <feGaussianBlur stdDeviation="3" result="blur"/>
+    <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+  </filter>
+  <filter id="glow-node" x="-20%" y="-20%" width="140%" height="140%">
+    <feGaussianBlur stdDeviation="1.5" result="blur"/>
+    <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+  </filter>
+</defs>
+
+<!-- ════════════════════════════════════════════════════ -->
+<!-- CLUSTER BACKGROUNDS                                  -->
+<!-- ════════════════════════════════════════════════════ -->
+
+<!-- C1: User Repository -->
+<rect x="30" y="20" width="220" height="1040" rx="18"
+  fill="rgba(255,255,255,0.012)" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+<text x="140" y="46" text-anchor="middle" font-size="9" font-weight="700"
+  letter-spacing="0.14em" fill="#3f3f46" font-family="system-ui">USER REPOSITORY</text>
+
+<!-- C2: GitHub Data Layer -->
+<rect x="290" y="20" width="220" height="1040" rx="18"
+  fill="rgba(255,255,255,0.012)" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+<text x="400" y="46" text-anchor="middle" font-size="9" font-weight="700"
+  letter-spacing="0.14em" fill="#3f3f46" font-family="system-ui">GITHUB DATA LAYER</text>
+
+<!-- C3: Domain Scanner -->
+<rect x="550" y="20" width="240" height="1040" rx="18"
+  fill="rgba(14,165,233,0.02)" stroke="rgba(14,165,233,0.08)" stroke-width="1"/>
+<text x="670" y="46" text-anchor="middle" font-size="9" font-weight="700"
+  letter-spacing="0.14em" fill="#0ea5e9" font-family="system-ui" opacity="0.5">DOMAIN SCANNER</text>
+
+<!-- C4: System Detector -->
+<rect x="830" y="20" width="240" height="1040" rx="18"
+  fill="rgba(139,92,246,0.02)" stroke="rgba(139,92,246,0.08)" stroke-width="1"/>
+<text x="950" y="46" text-anchor="middle" font-size="9" font-weight="700"
+  letter-spacing="0.14em" fill="#8b5cf6" font-family="system-ui" opacity="0.5">SYSTEM DETECTOR</text>
+
+<!-- C5: Intelligence Layer -->
+<rect x="1110" y="20" width="240" height="1040" rx="18"
+  fill="rgba(16,185,129,0.02)" stroke="rgba(16,185,129,0.08)" stroke-width="1"/>
+<text x="1230" y="46" text-anchor="middle" font-size="9" font-weight="700"
+  letter-spacing="0.14em" fill="#10b981" font-family="system-ui" opacity="0.5">INTELLIGENCE LAYER</text>
+
+<!-- C6: Architecture Workspace -->
+<rect x="1390" y="20" width="240" height="1040" rx="18"
+  fill="rgba(255,255,255,0.012)" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+<text x="1510" y="46" text-anchor="middle" font-size="9" font-weight="700"
+  letter-spacing="0.14em" fill="#3f3f46" font-family="system-ui">ARCHITECTURE WORKSPACE</text>
+
+
+<!-- ════════════════════════════════════════════════════ -->
+<!-- EDGES — drawn before nodes so nodes sit on top      -->
+<!-- ════════════════════════════════════════════════════ -->
+
+<!-- CRITICAL PATH (red) -->
+<!-- user-repo → fetch-repo-tree -->
+<path class="edge edge-critical edge-domain edge-system"
+  d="M 250,130 C 270,130 270,200 290,200"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-crit)"/>
+
+<!-- fetch-repo-tree → build-domain-map -->
+<path class="edge edge-critical edge-domain"
+  d="M 510,200 C 530,200 530,300 550,300"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-crit)"/>
+
+<!-- fetch-repo-tree → get-or-build-sys-map (parallel branch) -->
+<path class="edge edge-critical edge-system"
+  d="M 510,200 C 670,200 670,440 830,440"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.5" stroke-dasharray="6,3"
+  marker-end="url(#arr-crit)"/>
+
+<!-- build-domain-map → enrich-sys-map -->
+<path class="edge edge-critical edge-domain"
+  d="M 790,300 C 810,300 810,530 830,530"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-crit)"/>
+
+<!-- get-or-build-sys-map → enrich-sys-map -->
+<path class="edge edge-critical edge-system"
+  d="M 950,440 C 950,480 950,510 950,530"
+  stroke="#8b5cf6" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-system)"/>
+
+<!-- enrich-sys-map → serialize-fn -->
+<path class="edge edge-critical edge-system edge-domain"
+  d="M 1070,530 C 1090,530 1090,440 1110,440"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-crit)"/>
+
+<!-- build-domain-map → serialize-fn (also feeds) -->
+<path class="edge edge-critical edge-domain"
+  d="M 790,300 C 960,300 960,440 1110,440"
+  stroke="#0ea5e9" stroke-width="1" fill="none" opacity="0.4" stroke-dasharray="4,3"
+  marker-end="url(#arr-domain)"/>
+
+<!-- serialize-fn → api-architecture -->
+<path class="edge edge-critical edge-domain edge-system"
+  d="M 1350,440 C 1370,440 1370,300 1390,300"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-crit)"/>
+
+<!-- api-architecture → use-arch-hook -->
+<path class="edge edge-critical edge-domain edge-system"
+  d="M 1510,300 C 1510,340 1510,360 1510,380"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-crit)"/>
+
+<!-- use-arch-hook → arch-page -->
+<path class="edge edge-critical edge-domain edge-system"
+  d="M 1510,450 C 1510,480 1510,500 1510,520"
+  stroke="#ef4444" stroke-width="1.5" fill="none" opacity="0.7"
+  marker-end="url(#arr-crit)"/>
+
+<!-- arch-page → arch-tree-comp -->
+<path class="edge edge-domain edge-system"
+  d="M 1510,590 C 1510,620 1510,640 1510,660"
+  stroke="#3f3f46" stroke-width="1" fill="none" opacity="0.6"
+  marker-end="url(#arr-norm)"/>
+
+<!-- arch-tree-comp → arch-node-comp -->
+<path class="edge edge-domain edge-system"
+  d="M 1510,730 C 1510,760 1510,780 1510,800"
+  stroke="#3f3f46" stroke-width="1" fill="none" opacity="0.6"
+  marker-end="url(#arr-norm)"/>
+
+<!-- NON-CRITICAL supporting edges -->
+
+<!-- pkg-json-input → get-or-build-sys-map -->
+<path class="edge edge-system"
+  d="M 250,250 C 530,250 530,440 830,440"
+  stroke="#8b5cf6" stroke-width="1" fill="none" opacity="0.35" stroke-dasharray="5,3"
+  marker-end="url(#arr-system)"/>
+
+<!-- file-tree-input → search-tree -->
+<path class="edge edge-domain"
+  d="M 250,360 C 270,360 270,380 290,380"
+  stroke="#0ea5e9" stroke-width="1" fill="none" opacity="0.35"
+  marker-end="url(#arr-domain)"/>
+
+<!-- search-tree → build-domain-map (evidence enrichment) -->
+<path class="edge edge-domain"
+  d="M 510,380 C 530,380 530,300 550,300"
+  stroke="#0ea5e9" stroke-width="1" fill="none" opacity="0.35"
+  marker-end="url(#arr-domain)"/>
+
+<!-- search-tree → get-or-build-sys-map (keyword search for enrich) -->
+<path class="edge edge-system"
+  d="M 510,380 C 670,380 670,440 830,440"
+  stroke="#8b5cf6" stroke-width="1" fill="none" opacity="0.25" stroke-dasharray="4,3"
+  marker-end="url(#arr-system)"/>
+
+<!-- github-api → fetch-repo-tree -->
+<path class="edge"
+  d="M 400,550 C 400,450 400,320 400,270"
+  stroke="#3f3f46" stroke-width="1" fill="none" opacity="0.35" stroke-dasharray="4,3"
+  marker-end="url(#arr-norm)"/>
+
+<!-- domain-prefixes → build-domain-map -->
+<path class="edge edge-domain"
+  d="M 670,200 C 670,240 670,270 670,300"
+  stroke="#0ea5e9" stroke-width="1.2" fill="none" opacity="0.5"
+  marker-end="url(#arr-domain)"/>
+
+<!-- pressure-label → build-domain-map (feeds label assignment) -->
+<path class="edge edge-domain"
+  d="M 670,400 C 670,370 670,340 670,300"
+  stroke="#0ea5e9" stroke-width="0.8" fill="none" opacity="0.25" stroke-dasharray="3,3"
+  marker-end="url(#arr-domain)"/>
+
+<!-- arch-domain-type → serialize-fn -->
+<path class="edge edge-domain"
+  d="M 670,520 C 900,520 900,440 1110,440"
+  stroke="#0ea5e9" stroke-width="0.8" fill="none" opacity="0.2" stroke-dasharray="3,3"
+  marker-end="url(#arr-domain)"/>
+
+<!-- package-signals → get-or-build-sys-map -->
+<path class="edge edge-system"
+  d="M 950,200 C 950,300 950,380 950,440"
+  stroke="#8b5cf6" stroke-width="1.2" fill="none" opacity="0.5"
+  marker-end="url(#arr-system)"/>
+
+<!-- sys-evidence-keywords → enrich-sys-map -->
+<path class="edge edge-system"
+  d="M 950,310 C 950,390 950,470 950,530"
+  stroke="#8b5cf6" stroke-width="0.8" fill="none" opacity="0.35" stroke-dasharray="4,3"
+  marker-end="url(#arr-system)"/>
+
+<!-- system-vocabulary → serialize-fn -->
+<path class="edge edge-system"
+  d="M 950,640 C 1050,640 1050,440 1110,440"
+  stroke="#8b5cf6" stroke-width="0.8" fill="none" opacity="0.25" stroke-dasharray="3,3"
+  marker-end="url(#arr-system)"/>
+
+<!-- arch-tree-node → serialize-fn -->
+<path class="edge edge-domain edge-system"
+  d="M 1230,200 C 1230,310 1230,380 1230,440"
+  stroke="#10b981" stroke-width="0.8" fill="none" opacity="0.3" stroke-dasharray="3,3"
+  marker-end="url(#arr-norm)"/>
+
+<!-- arch-response → api-architecture -->
+<path class="edge edge-domain edge-system"
+  d="M 1230,540 C 1360,540 1360,330 1390,300"
+  stroke="#10b981" stroke-width="0.8" fill="none" opacity="0.3" stroke-dasharray="3,3"
+  marker-end="url(#arr-norm)"/>
+
+
+<!-- ════════════════════════════════════════════════════ -->
+<!-- NODES                                               -->
+<!-- ════════════════════════════════════════════════════ -->
+
+<!-- ── C1: USER REPOSITORY ─────────────────────────── -->
+
+<!-- N01 user-repo (CRITICAL) -->
+<g class="node node-critical node-domain node-system" transform="translate(140,130)"
+  data-label="User Repository"
+  data-file="GitHub URL via RepositorySelector"
+  data-role="The user's GitHub repo. Everything DE-code X knows starts here — no repo selected means no tree, no systems, no map."
+  data-note="Stored as { fullName, defaultBranch } in RepositoryContext. Owner + repo name split on '/'."
+  data-badge="critical">
+  <rect x="-80" y="-28" width="160" height="56" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-8" text-anchor="middle" font-size="12" font-weight="600" fill="#fca5a5" font-family="system-ui">User Repository</text>
+  <text y="10" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">github.com/{owner}/{repo}</text>
+  <circle cx="62" cy="-18" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N02 pkg-json-input -->
+<g class="node node-system" transform="translate(140,250)"
+  data-label="package.json"
+  data-file="repo root / package.json"
+  data-role="Primary signal for System Detector. Lists all npm dependencies. DE-code X reads this via the GitHub tree to identify installed packages — not the lock file."
+  data-note="Matched against PACKAGE_SIGNALS (~70 entries). Presence = partial evidence. Does NOT confirm usage."
+  data-badge="data">
+  <rect x="-80" y="-26" width="160" height="52" rx="10"
+    fill="rgba(59,130,246,0.05)" stroke="rgba(59,130,246,0.2)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#93c5fd" font-family="system-ui">package.json</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">npm dependency list</text>
+</g>
+
+<!-- N03 file-tree-input -->
+<g class="node node-domain" transform="translate(140,360)"
+  data-label="Repository File Tree"
+  data-file="GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
+  data-role="The full file path list from GitHub. Domain Scanner uses directory paths to match structural domains. System Detector uses filenames for keyword proximity search."
+  data-note="Returned as flat blob list. Files are NOT read — only path strings are processed. 10-min in-process cache."
+  data-badge="data">
+  <rect x="-80" y="-26" width="160" height="52" rx="10"
+    fill="rgba(14,165,233,0.05)" stroke="rgba(14,165,233,0.2)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#7dd3fc" font-family="system-ui">File Tree (blob list)</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">all paths, no file content</text>
+</g>
+
+
+<!-- ── C2: GITHUB DATA LAYER ───────────────────────── -->
+
+<!-- N04 fetch-repo-tree (CRITICAL) -->
+<g class="node node-critical node-domain node-system" transform="translate(400,200)"
+  data-label="fetchRepoTree()"
+  data-file="services/github/tree.ts"
+  data-role="Fetches the complete recursive file tree from GitHub API using the user's decrypted OAuth token. Returns flat path list. Central data source for all downstream analysis."
+  data-note="Cache: Map&lt;string, CacheEntry&gt;, TTL = 10 min. Key = `{owner}/{repo}@{branch}`. Serverless resets cache on cold start."
+  data-badge="critical">
+  <rect x="-90" y="-28" width="180" height="56" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-8" text-anchor="middle" font-size="12" font-weight="600" fill="#fca5a5" font-family="system-ui">fetchRepoTree()</text>
+  <text y="10" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">services/github/tree.ts</text>
+  <circle cx="72" cy="-18" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N05 search-tree -->
+<g class="node node-domain node-system" transform="translate(400,380)"
+  data-label="searchTree()"
+  data-file="services/github/tree.ts"
+  data-role="Keyword proximity search across the flat file tree. Used by enrichSystemMapWithTree() to find evidence files — paths containing system keywords near package names."
+  data-note="Returns matching file paths. Used to upgrade partial → strong evidence. Does NOT open files."
+  data-badge="service">
+  <rect x="-80" y="-26" width="160" height="52" rx="10"
+    fill="rgba(16,185,129,0.04)" stroke="rgba(16,185,129,0.15)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#6ee7b7" font-family="system-ui">searchTree()</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">keyword proximity in paths</text>
+</g>
+
+<!-- N06 github-api -->
+<g class="node" transform="translate(400,550)"
+  data-label="GitHub REST API"
+  data-file="api.github.com/repos/…"
+  data-role="External GitHub API. Called server-side only using the user's OAuth token (decrypted AES-256-GCM). Token never sent to the browser."
+  data-note="User token stored encrypted in DB. Decrypted at request time with ENCRYPTION_KEY env var."
+  data-badge="external">
+  <rect x="-80" y="-26" width="160" height="52" rx="10"
+    fill="rgba(245,158,11,0.04)" stroke="rgba(245,158,11,0.15)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#fcd34d" font-family="system-ui">GitHub REST API</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">external · server-side only</text>
+</g>
+
+
+<!-- ── C3: DOMAIN SCANNER ───────────────────────────── -->
+
+<!-- N07 domain-prefixes (DATA NODE — the "prefix files") -->
+<g class="node node-domain" transform="translate(670,180)"
+  data-label="DOMAIN_PREFIXES"
+  data-file="server/repo/domain-prefixes.ts"
+  data-role="55 directory prefix entries mapping path patterns to domain labels. e.g. 'src/server/auth' → Authentication, 'src/components' → UI Components. Sorted longest-first for greedy matching."
+  data-note="SORTED_PREFIXES = [...DOMAIN_PREFIXES].sort by length desc. Longest match wins — 'src/server/auth' beats 'src/server'. Used by buildDomainMap()."
+  data-badge="data">
+  <rect x="-95" y="-32" width="190" height="64" rx="12"
+    fill="rgba(14,165,233,0.08)" stroke="rgba(14,165,233,0.3)" stroke-width="1.5"/>
+  <text y="-12" text-anchor="middle" font-size="11" font-weight="700" fill="#38bdf8" font-family="monospace">DOMAIN_PREFIXES</text>
+  <text y="4" text-anchor="middle" font-size="9" fill="#0ea5e9" font-family="system-ui">55 entries · longest-match-wins</text>
+  <text y="18" text-anchor="middle" font-size="8.5" fill="#374151" font-family="system-ui">server/repo/domain-prefixes.ts</text>
+</g>
+
+<!-- N08 build-domain-map (CRITICAL) -->
+<g class="node node-critical node-domain" transform="translate(670,300)"
+  data-label="buildDomainMap()"
+  data-file="server/repo/domain-scanner.ts"
+  data-role="Iterates every file path in the tree. For each path, walks SORTED_PREFIXES and assigns the first (longest) matching prefix as the domain. Counts files per domain."
+  data-note="Output: Map&lt;domainLabel, {fileCount, pressure}&gt;. 'hot' = &gt;50 files, 'warm' = &gt;10, 'cold' = &lt;=10. Runs in parallel with getOrBuildSystemMap."
+  data-badge="critical">
+  <rect x="-90" y="-28" width="180" height="56" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-8" text-anchor="middle" font-size="12" font-weight="600" fill="#fca5a5" font-family="system-ui">buildDomainMap()</text>
+  <text y="10" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">server/repo/domain-scanner.ts</text>
+  <circle cx="72" cy="-18" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N09 pressure-label -->
+<g class="node node-domain" transform="translate(670,400)"
+  data-label="PressureLabel"
+  data-file="types/architecture.ts"
+  data-role="Classifies each domain by file density. 'hot' (&gt;50 files), 'warm' (&gt;10), 'cold' (≤10). Shown as a chip on domain nodes in the Architecture Workspace UI."
+  data-note="Type: 'hot' | 'warm' | 'cold'. Computed inside buildDomainMap, stored on each domain node."
+  data-badge="type">
+  <rect x="-80" y="-26" width="160" height="52" rx="10"
+    fill="rgba(168,85,247,0.05)" stroke="rgba(168,85,247,0.18)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#d8b4fe" font-family="system-ui">PressureLabel</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">hot · warm · cold</text>
+</g>
+
+<!-- N10 arch-domain-type -->
+<g class="node node-domain" transform="translate(670,520)"
+  data-label="ArchitectureDomain"
+  data-file="types/architecture.ts — NodeType='domain'"
+  data-role="Wire type for a structural domain node in the output tree. Fields: id, label, type='domain', confidence, pressure, fileCount, prefix."
+  data-note="confidence is always 'directory' for domains — no package or source evidence used at this layer."
+  data-badge="type">
+  <rect x="-80" y="-26" width="160" height="52" rx="10"
+    fill="rgba(168,85,247,0.05)" stroke="rgba(168,85,247,0.18)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#d8b4fe" font-family="system-ui">NodeType = 'domain'</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">structural domain wire type</text>
+</g>
+
+
+<!-- ── C4: SYSTEM DETECTOR ──────────────────────────── -->
+
+<!-- N11 package-signals -->
+<g class="node node-system" transform="translate(950,200)"
+  data-label="PACKAGE_SIGNALS"
+  data-file="server/repo/package-signals.ts"
+  data-role="~70 npm package → system mappings. e.g. @clerk/nextjs → Authentication, prisma → Database, openai → AI Orchestration, stripe → Payments, ioredis → Infrastructure/Caching."
+  data-note="Used by getOrBuildSystemMap(). Partial evidence only — package installed ≠ package actually used."
+  data-badge="data">
+  <rect x="-95" y="-32" width="190" height="64" rx="12"
+    fill="rgba(139,92,246,0.08)" stroke="rgba(139,92,246,0.3)" stroke-width="1.5"/>
+  <text y="-12" text-anchor="middle" font-size="11" font-weight="700" fill="#a78bfa" font-family="monospace">PACKAGE_SIGNALS</text>
+  <text y="4" text-anchor="middle" font-size="9" fill="#8b5cf6" font-family="system-ui">~70 packages · 8 systems</text>
+  <text y="18" text-anchor="middle" font-size="8.5" fill="#374151" font-family="system-ui">server/repo/package-signals.ts</text>
+</g>
+
+<!-- N12 sys-evidence-keywords -->
+<g class="node node-system" transform="translate(950,310)"
+  data-label="SYSTEM_EVIDENCE_KEYWORDS"
+  data-file="server/repo/system-vocabulary.ts"
+  data-role="8 systems × 6 keywords for source-file evidence search. e.g. Authentication → ['auth', 'session', 'jwt', 'token', 'login', 'oauth']. Used by enrichSystemMapWithTree."
+  data-note="Keyword proximity = keyword appears near a matching filename in the flat tree. File content is NOT read."
+  data-badge="data">
+  <rect x="-95" y="-26" width="190" height="52" rx="10"
+    fill="rgba(139,92,246,0.05)" stroke="rgba(139,92,246,0.2)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="10.5" font-weight="600" fill="#c4b5fd" font-family="monospace">SYSTEM_EVIDENCE_KEYWORDS</text>
+  <text y="9" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">8 systems × 6 keywords each</text>
+</g>
+
+<!-- N13 get-or-build-sys-map (CRITICAL) -->
+<g class="node node-critical node-system" transform="translate(950,440)"
+  data-label="getOrBuildSystemMap()"
+  data-file="server/repo/system-detector.ts"
+  data-role="Reads package.json from the tree, matches dependency names against PACKAGE_SIGNALS, builds initial system map with 'partial' confidence for all matches."
+  data-note="Cache: 60-min in-process TTL. Returns Map&lt;systemName, SystemStatus&gt;. Runs in parallel with buildDomainMap via Promise.all in route.ts."
+  data-badge="critical">
+  <rect x="-100" y="-30" width="200" height="60" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-10" text-anchor="middle" font-size="11.5" font-weight="600" fill="#fca5a5" font-family="system-ui">getOrBuildSystemMap()</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">server/repo/system-detector.ts</text>
+  <circle cx="82" cy="-20" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N14 enrich-sys-map (CRITICAL) -->
+<g class="node node-critical node-system" transform="translate(950,530)"
+  data-label="enrichSystemMapWithTree()"
+  data-file="server/repo/system-detector.ts"
+  data-role="Upgrades 'partial' → 'strong' evidence by running keyword proximity search on the file tree. If auth keywords appear near auth-related filenames, Authentication gets source-confirmed status."
+  data-note="'Strong' = ✅ source-confirmed. 'Partial' = ⚠️ package.json only. Strong evidence also populates evidenceFiles[] on the node."
+  data-badge="critical">
+  <rect x="-100" y="-28" width="200" height="56" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#fca5a5" font-family="system-ui">enrichSystemMapWithTree()</text>
+  <text y="10" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">server/repo/system-detector.ts</text>
+  <circle cx="82" cy="-18" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N15 system-vocabulary -->
+<g class="node node-system" transform="translate(950,640)"
+  data-label="SystemStatus"
+  data-file="server/repo/system-vocabulary.ts"
+  data-role="Union type: 'strong' | 'partial' | 'missing'. All 8 canonical system names defined here: Authentication, Database, AI Orchestration, Realtime Messaging, File Uploads, Payments, Queue Systems, Infrastructure/Caching."
+  data-note="'missing' systems are omitted from the output tree — only detected systems are serialized."
+  data-badge="type">
+  <rect x="-90" y="-26" width="180" height="52" rx="10"
+    fill="rgba(168,85,247,0.05)" stroke="rgba(168,85,247,0.18)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#d8b4fe" font-family="system-ui">SystemStatus</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">strong · partial · missing</text>
+</g>
+
+
+<!-- ── C5: INTELLIGENCE LAYER ───────────────────────── -->
+
+<!-- N16 arch-tree-node -->
+<g class="node node-domain node-system" transform="translate(1230,200)"
+  data-label="ArchitectureTreeNode"
+  data-file="types/architecture.ts"
+  data-role="The unified wire type for every node in the output tree. Fields: id, label, type, confidence, pressure, fileCount, prefix, systemName, components, evidenceFiles, evidenceNote, children."
+  data-note="v1 reserved: integrityScore=null, trustBoundaryNote=null, weakSeams=null. All 3 fields always null in v1 — placeholders for v2."
+  data-badge="type">
+  <rect x="-90" y="-28" width="180" height="56" rx="12"
+    fill="rgba(168,85,247,0.06)" stroke="rgba(168,85,247,0.22)" stroke-width="1.2"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#d8b4fe" font-family="system-ui">ArchitectureTreeNode</text>
+  <text y="10" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">types/architecture.ts</text>
+</g>
+
+<!-- N17 serialize-fn (CRITICAL) -->
+<g class="node node-critical node-domain node-system" transform="translate(1230,440)"
+  data-label="serializeArchitectureTree()"
+  data-file="server/repo/architecture-serializer.ts"
+  data-role="Converts domainMap + systemMap into the ArchitectureTreeNode[] output. Creates two parallel root sections: 'Structural Domains' and 'Detected Systems' as siblings — never nested."
+  data-note="Parallel sections model is intentional: mixing structural and logical evidence creates false authority. Strong-confidence systems get evidenceFiles[] children; partial-only get none."
+  data-badge="critical">
+  <rect x="-100" y="-30" width="200" height="60" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-10" text-anchor="middle" font-size="11" font-weight="600" fill="#fca5a5" font-family="system-ui">serializeArchitectureTree()</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">server/repo/architecture-serializer.ts</text>
+  <circle cx="82" cy="-20" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N18 arch-response -->
+<g class="node node-domain node-system" transform="translate(1230,540)"
+  data-label="ArchitectureResponse"
+  data-file="types/architecture.ts"
+  data-role="Final JSON shape returned by GET /api/repo/architecture. Fields: tree[], domainSource, systemSource, repoFullName, generatedAt."
+  data-note="systemSource = 'package-json' | 'package-json+source-evidence'. Tells UI how much trust to assign."
+  data-badge="type">
+  <rect x="-90" y="-26" width="180" height="52" rx="10"
+    fill="rgba(168,85,247,0.05)" stroke="rgba(168,85,247,0.18)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#d8b4fe" font-family="system-ui">ArchitectureResponse</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">types/architecture.ts</text>
+</g>
+
+<!-- N19 cache-notes -->
+<g class="node" transform="translate(1230,660)"
+  data-label="Cache Strategy"
+  data-file="services/github/tree.ts + system-detector.ts"
+  data-role="Two independent caches: repo tree (10-min TTL) and system map (60-min TTL). Both use Map&lt;string, CacheEntry&gt; in-process. Serverless resets both on cold start."
+  data-note="Cache key for tree: `{owner}/{repo}@{branch}`. No Redis or external cache in v1 — intentional for simplicity."
+  data-badge="service">
+  <rect x="-80" y="-26" width="160" height="52" rx="10"
+    fill="rgba(16,185,129,0.04)" stroke="rgba(16,185,129,0.15)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#6ee7b7" font-family="system-ui">Cache Strategy</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">tree 10min · systems 60min</text>
+</g>
+
+
+<!-- ── C6: ARCHITECTURE WORKSPACE ──────────────────── -->
+
+<!-- N20 api-architecture (CRITICAL) -->
+<g class="node node-critical node-domain node-system" transform="translate(1510,300)"
+  data-label="GET /api/repo/architecture"
+  data-file="app/api/repo/architecture/route.ts"
+  data-role="The API route that orchestrates the full pipeline. Auth → decrypt token → Promise.all(fetchRepoTree, getOrBuildSystemMap) → enrich → build domains → serialize → return JSON."
+  data-note="Returns 404/403 on GitHub errors. GitHub token never in response body. Validates owner+repo query params."
+  data-badge="critical">
+  <rect x="-100" y="-30" width="200" height="60" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-10" text-anchor="middle" font-size="11" font-weight="600" fill="#fca5a5" font-family="system-ui">GET /api/repo/architecture</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">app/api/repo/architecture/route.ts</text>
+  <circle cx="82" cy="-20" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N21 use-arch-hook (CRITICAL) -->
+<g class="node node-critical node-domain node-system" transform="translate(1510,415)"
+  data-label="useArchitectureTree()"
+  data-file="hooks/use-architecture-tree.ts"
+  data-role="React hook. Calls GET /api/repo/architecture when activeRepository changes. Returns one of 5 states: loading, success, partial, error, empty. Stale-fetch protection via fetchIdRef."
+  data-note="'partial' state fires when only one of the two parallel sections is present. Prevents race-condition rerenders."
+  data-badge="critical">
+  <rect x="-100" y="-28" width="200" height="56" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#fca5a5" font-family="system-ui">useArchitectureTree()</text>
+  <text y="10" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">hooks/use-architecture-tree.ts</text>
+  <circle cx="82" cy="-18" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N22 arch-page (CRITICAL) -->
+<g class="node node-critical node-domain node-system" transform="translate(1510,520)"
+  data-label="ArchitectureWorkspacePage"
+  data-file="features/architecture/architecture-workspace-page.tsx"
+  data-role="Page shell. Shows repo badge, PageHeading, 'No repository selected' empty state, status row with loading spinner, and the ArchitectureTree component. v1 disclaimer at bottom."
+  data-note="Uses useActiveRepository() + useArchitectureTree(). Splits fullName on '/' to display owner/repo separately."
+  data-badge="critical">
+  <rect x="-100" y="-28" width="200" height="56" rx="12"
+    fill="rgba(239,68,68,0.08)" stroke="rgba(239,68,68,0.35)" stroke-width="1.5" filter="url(#glow-node)"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#fca5a5" font-family="system-ui">ArchitectureWorkspacePage</text>
+  <text y="10" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">features/architecture/…-page.tsx</text>
+  <circle cx="82" cy="-18" r="4" fill="#ef4444" opacity="0.8"/>
+</g>
+
+<!-- N23 arch-tree-comp -->
+<g class="node node-domain node-system" transform="translate(1510,660)"
+  data-label="ArchitectureTree"
+  data-file="features/architecture/components/architecture-tree.tsx"
+  data-role="Handles all 5 UI states. loading → SkeletonSection. error → error banner. empty → prompt to select repo. partial → PartialBanner. success → renders all root nodes."
+  data-note="Passes each root node to ArchitectureNode. Renders TreeFooter with generatedAt + systemSource metadata."
+  data-badge="service">
+  <rect x="-90" y="-26" width="180" height="52" rx="10"
+    fill="rgba(16,185,129,0.04)" stroke="rgba(16,185,129,0.15)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#6ee7b7" font-family="system-ui">ArchitectureTree</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">components/architecture-tree.tsx</text>
+</g>
+
+<!-- N24 arch-node-comp -->
+<g class="node node-domain node-system" transform="translate(1510,800)"
+  data-label="ArchitectureNode"
+  data-file="features/architecture/components/architecture-node.tsx"
+  data-role="Individual node renderer. Shows ConfidenceChip (✅ strong / ⚠️ partial / 📁 directory), PressureChip (hot/warm/cold), NodeIcon, label, and children via AnimatePresence."
+  data-note="depth-based indentation: 16px per level. Expand/collapse via local state. framer-motion AnimatePresence for smooth transitions."
+  data-badge="service">
+  <rect x="-90" y="-26" width="180" height="52" rx="10"
+    fill="rgba(16,185,129,0.04)" stroke="rgba(16,185,129,0.15)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#6ee7b7" font-family="system-ui">ArchitectureNode</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="monospace">components/architecture-node.tsx</text>
+</g>
+
+<!-- N25 confidence-chip -->
+<g class="node" transform="translate(1510,900)"
+  data-label="ConfidenceChip"
+  data-file="features/architecture/components/architecture-node.tsx"
+  data-role="Visual badge on each system node. ✅ strong = source-confirmed (keyword proximity found). ⚠️ partial = package.json only. 📁 directory-only for domain nodes."
+  data-note="Strong confidence also enables evidenceFiles[] children to render. Partial-only nodes show no child file list."
+  data-badge="service">
+  <rect x="-90" y="-26" width="180" height="52" rx="10"
+    fill="rgba(16,185,129,0.03)" stroke="rgba(16,185,129,0.1)" stroke-width="1"/>
+  <text y="-8" text-anchor="middle" font-size="11" font-weight="600" fill="#6ee7b7" font-family="system-ui">ConfidenceChip</text>
+  <text y="8" text-anchor="middle" font-size="9" fill="#52525b" font-family="system-ui">✅ strong · ⚠️ partial · 📁 dir</text>
+</g>
+
+
+<!-- ════════════════════════════════════════════════════ -->
+<!-- PARALLEL EXECUTION ANNOTATION                       -->
+<!-- ════════════════════════════════════════════════════ -->
+<text x="670" y="370" text-anchor="middle" font-size="8.5" fill="#374151" font-family="system-ui">▲ runs in parallel ▲</text>
+<text x="950" y="405" text-anchor="middle" font-size="8.5" fill="#374151" font-family="system-ui">▲ Promise.all() ▲</text>
+<line x1="560" y1="377" x2="1050" y2="377" stroke="#374151" stroke-width="0.5" stroke-dasharray="3,3"/>
+<text x="805" y="373" text-anchor="middle" font-size="8" fill="#3f3f46" font-family="system-ui">concurrent in route.ts</text>
+
+</svg>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip">
+  <div class="t-label" id="tt-label"></div>
+  <div class="t-file"  id="tt-file"></div>
+  <div class="t-role"  id="tt-role"></div>
+  <div class="t-note"  id="tt-note"></div>
+  <span class="t-badge" id="tt-badge"></span>
+</div>
+
+<!-- Legend -->
+<div id="legend">
+  <div class="leg-row"><div class="leg-line" style="background:#ef4444"></div> Critical path</div>
+  <div class="leg-row"><div class="leg-line" style="background:#0ea5e9"></div> Domain pipeline</div>
+  <div class="leg-row"><div class="leg-line" style="background:#8b5cf6"></div> System pipeline</div>
+  <div class="leg-row"><div class="leg-line" style="background:#3f3f46"></div> Supporting edge</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#60a5fa"></div> Data node</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#c084fc"></div> Type / schema</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#ef4444"></div> Critical node</div>
+</div>
+
+<script>
+// ── Pan + zoom ────────────────────────────────────────────────────────────
+const wrap = document.getElementById('canvas-wrap');
+const svg  = document.getElementById('svg-root');
+let scale = 0.78, tx = 0, ty = 0;
+let dragging = false, lastX = 0, lastY = 0;
+
+function applyTransform() {
+  svg.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+  svg.style.transformOrigin = '0 0';
+}
+
+// Initial center
+function fitToScreen() {
+  const W = wrap.clientWidth - 280; // sidebar
+  const H = wrap.clientHeight;
+  scale = Math.min(W / 1680, H / 1080) * 0.92;
+  tx = (W - 1680 * scale) / 2;
+  ty = (H - 1080 * scale) / 2;
+  applyTransform();
+}
+fitToScreen();
+
+wrap.addEventListener('mousedown', e => {
+  if (e.target.closest('.node')) return;
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  tx += e.clientX - lastX; ty += e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  applyTransform();
+});
+window.addEventListener('mouseup', () => dragging = false);
+
+wrap.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.1 : 0.91;
+  const rect = wrap.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  tx = mx - (mx - tx) * factor;
+  ty = my - (my - ty) * factor;
+  scale *= factor;
+  applyTransform();
+}, { passive: false });
+
+document.getElementById('zoom-in').onclick   = () => { scale *= 1.15; applyTransform(); };
+document.getElementById('zoom-out').onclick  = () => { scale *= 0.87; applyTransform(); };
+document.getElementById('zoom-reset').onclick = fitToScreen;
+
+// ── Tooltip ───────────────────────────────────────────────────────────────
+const tooltip  = document.getElementById('tooltip');
+const ttLabel  = document.getElementById('tt-label');
+const ttFile   = document.getElementById('tt-file');
+const ttRole   = document.getElementById('tt-role');
+const ttNote   = document.getElementById('tt-note');
+const ttBadge  = document.getElementById('tt-badge');
+
+const BADGE_MAP = {
+  critical: ['badge-critical', '● CRITICAL PATH'],
+  data:     ['badge-data',     '◆ DATA NODE'],
+  type:     ['badge-type',     '◈ TYPE / SCHEMA'],
+  service:  ['badge-service',  '◉ SERVICE'],
+  external: ['badge-external', '◌ EXTERNAL'],
+};
+
+document.querySelectorAll('.node').forEach(node => {
+  node.style.cursor = 'pointer';
+
+  node.addEventListener('mouseenter', e => {
+    ttLabel.textContent = node.dataset.label || '';
+    ttFile.textContent  = node.dataset.file  || '';
+    ttRole.textContent  = node.dataset.role  || '';
+    ttNote.textContent  = node.dataset.note  || '';
+    const b = BADGE_MAP[node.dataset.badge];
+    if (b) { ttBadge.className = 't-badge ' + b[0]; ttBadge.textContent = b[1]; }
+    else   { ttBadge.className = 't-badge'; ttBadge.textContent = ''; }
+    tooltip.classList.add('show');
+  });
+
+  node.addEventListener('mousemove', e => {
+    const x = Math.min(e.clientX + 16, window.innerWidth - 290);
+    const y = Math.min(e.clientY + 16, window.innerHeight - 200);
+    tooltip.style.left = x + 'px';
+    tooltip.style.top  = y + 'px';
+  });
+
+  node.addEventListener('mouseleave', () => tooltip.classList.remove('show'));
+});
+
+// ── Filter chips ──────────────────────────────────────────────────────────
+const chips = document.querySelectorAll('.chip');
+chips.forEach(chip => {
+  chip.addEventListener('click', () => {
+    chips.forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    const filter = chip.dataset.filter;
+    applyFilter(filter);
+  });
+});
+
+function applyFilter(filter) {
+  const nodes = document.querySelectorAll('.node');
+  const edges = document.querySelectorAll('.edge');
+
+  nodes.forEach(n => {
+    if (filter === 'all') {
+      n.style.opacity = '1';
+    } else if (filter === 'domain') {
+      n.style.opacity = n.classList.contains('node-domain') ? '1' : '0.15';
+    } else if (filter === 'system') {
+      n.style.opacity = n.classList.contains('node-system') ? '1' : '0.15';
+    } else if (filter === 'critical') {
+      n.style.opacity = n.classList.contains('node-critical') ? '1' : '0.15';
+    }
+  });
+
+  edges.forEach(e => {
+    if (filter === 'all') {
+      e.style.opacity = null; // restore original
+    } else if (filter === 'domain') {
+      e.style.opacity = e.classList.contains('edge-domain') ? null : '0.05';
+    } else if (filter === 'system') {
+      e.style.opacity = e.classList.contains('edge-system') ? null : '0.05';
+    } else if (filter === 'critical') {
+      e.style.opacity = e.classList.contains('edge-critical') ? null : '0.05';
+    }
+  });
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────
+const sidebar = document.getElementById('sidebar');
+document.getElementById('sidebar-toggle').onclick = () => sidebar.classList.toggle('hidden');
+document.getElementById('sidebar-close').onclick  = () => sidebar.classList.add('hidden');
+</script>
+</body>
+</html>

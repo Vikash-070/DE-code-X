@@ -1,0 +1,38 @@
+# ── Build outputs ─────────────────────────────────────────
+.next
+out
+dist
+build
+
+# ── Dependencies ──────────────────────────────────────────
+node_modules
+
+# ── Environment files ─────────────────────────────────────
+# The canonical runtime file is .env at the repo root — NEVER commit it.
+# All .env* patterns are excluded; only .env.example (the template) is allowed.
+.env
+.env.*
+
+# apps/web legacy — explicitly excluded regardless of pattern order
+apps/web/.env
+apps/web/.env.*
+
+# Allow only the documented, secrets-free template
+!.env.example
+
+# ── Clerk ─────────────────────────────────────────────────
+/.clerk/
+
+# ── Debug logs ────────────────────────────────────────────
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── OS / editor ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+
+# ── TypeScript ────────────────────────────────────────────
+*.tsbuildinfo

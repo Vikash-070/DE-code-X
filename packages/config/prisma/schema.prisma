@@ -1,0 +1,184 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String              @id @default(cuid())
+  clerkId      String              @unique
+  email        String              @unique
+  name         String?
+  avatarUrl    String?
+  projects     Project[]
+  providerKeys UserProviderKey[]
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  @@map("users")
+}
+
+/// Encrypted BYOK provider API keys.
+/// Raw key values are NEVER stored — only the AES-256-GCM ciphertext.
+model UserProviderKey {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// "anthropic" | "openrouter" | "openai"
+  provider     String
+  /// AES-256-GCM: "<iv_hex>:<ciphertext_hex>:<tag_hex>"
+  encryptedKey String
+  /// Optional model preference for this provider
+  model        String?
+  isActive     Boolean   @default(true)
+  lastUsedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([userId, provider])
+  @@map("user_provider_keys")
+}
+
+model Project {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  ownerId      String
+  owner        User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  repositories Repository[]
+  analyses     TutorialAnalysis[]
+  sessions     ImplementationSession[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("projects")
+}
+
+model Repository {
+  id              String   @id @default(cuid())
+  projectId       String
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  githubId        String?  @unique
+  name            String
+  fullName        String
+  defaultBranch   String   @default("main")
+  graphSnapshot   Json?
+  architectureMap Json?
+  lastScannedAt   DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@map("repositories")
+}
+
+model TutorialAnalysis {
+  id                    String   @id @default(cuid())
+  projectId             String
+  project               Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceType            String
+  sourceUrl             String?
+  rawInput              String
+  repositoryFullName    String?
+  pipelineStatus        String   @default("idle")
+  agentOutputs          Json?
+  extractedFeature      Json
+  compatibilityFindings Json
+  securityFindings      Json
+  scalabilityFindings   Json
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@map("tutorial_analyses")
+}
+
+model ImplementationSession {
+  id                  String   @id @default(cuid())
+  projectId           String
+  project             Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tutorialAnalysisId  String?
+  status              String   @default("draft")
+  roadmap             Json
+  affectedFiles       Json
+  dependencyChanges   Json
+  generatedPrompts    Json
+  mcpPayload          Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@map("implementation_sessions")
+}
+
+/// Per-module analysis of a single repository file.
+/// blobSHA is the GitHub blob SHA — used for staleness detection.
+/// findings is a CipherFinding[] stored as JSONB.
+///
+/// Dedup key: (repoFullName, filePath, branch, agentId)
+///   Each intelligence module (cipher, sentinel, pulse, atlas) keeps its own
+///   record for the same file. Modules never overwrite each other's findings.
+model FileIntelligence {
+  id           String   @id @default(cuid())
+  repoFullName String
+  filePath     String
+  blobSHA      String
+  branch       String   @default("main")
+  /// "cipher" | "sentinel" | "pulse" | "atlas" | "forge"
+  agentId      String   @default("cipher")
+  /// CipherFinding[] — see types/intelligence.ts
+  findings     Json
+  /// Architecture node IDs this file's findings attach to
+  nodeIds      String[]
+  /// "strong" | "partial"
+  confidence   String   @default("partial")
+  analyzedAt   DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  /// Incremented on each update — safe for optimistic concurrency checks
+  version      Int      @default(1)
+
+  @@unique([repoFullName, filePath, branch, agentId])
+  @@index([repoFullName, branch])
+  @@index([repoFullName, branch, agentId])
+  @@map("file_intelligence")
+}
+
+/// Semantic vector embeddings for analyzed repository files.
+/// Populated by Cipher after analysis — enables semantic search ("what files handle rate limiting?").
+///
+/// The `embedding` column is vector(1536) — managed by raw SQL migration, NOT by prisma migrate.
+/// See packages/config/prisma/migrations/add_file_embeddings.sql
+/// Prisma cannot generate queries for Unsupported types; all vector ops use $queryRaw / $executeRaw.
+model FileEmbedding {
+  id            String   @id @default(cuid())
+  repoFullName  String
+  filePath      String
+  branch        String   @default("main")
+  /// Embedding model used, e.g. "text-embedding-3-small"
+  model         String
+  /// The text that was embedded — path + domain + finding summaries (for debugging / re-embedding)
+  embeddingText String
+  /// Actual vector(1536) column — Prisma marks as Unsupported; managed via $queryRaw
+  embedding     Unsupported("vector(1536)")?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([repoFullName, filePath, branch])
+  @@index([repoFullName, branch])
+  @@map("file_embeddings")
+}
+
+/// Latest known file tree snapshot for a repo+branch.
+/// Stored as { path, blobSHA }[] in JSONB for staleness comparison.
+/// One row per (repoFullName, branch) — upserted on each architecture scan.
+model RepositorySnapshot {
+  id           String   @id @default(cuid())
+  repoFullName String
+  branch       String   @default("main")
+  snapshotAt   DateTime @default(now())
+  /// { path: string; blobSHA: string }[] — capped at 10,000 entries
+  fileEntries  Json
+
+  @@unique([repoFullName, branch])
+  @@map("repository_snapshots")
+}

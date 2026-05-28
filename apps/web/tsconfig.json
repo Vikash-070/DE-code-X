@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@decode-x/ui": ["../../packages/ui/src"],
+      "@decode-x/repo-intelligence": ["../../packages/repo-intelligence/src"],
+      "@decode-x/security-engine": ["../../packages/security-engine/src"],
+      "@decode-x/ai-orchestrator": ["../../packages/ai-orchestrator/src"],
+      "@decode-x/mcp": ["../../packages/mcp/src"],
+      "@decode-x/config": ["../../packages/config/src"]
+    },
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
+  },
+  "include": ["next-env.d.ts", "src/**/*.ts", "src/**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules", "src/**/__tests__/**"]
+}
