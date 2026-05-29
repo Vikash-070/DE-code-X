@@ -29,11 +29,15 @@ import { ArchitectureNode } from "./architecture-node";
 
 interface ArchitectureTreeProps {
   state: ArchitectureTreeState;
+  /** Called when the user clicks a domain node — loads the intelligence panel. */
+  onSelectDomain?: (domainPrefix: string) => void;
+  /** Currently-selected domain prefix, for node highlight. */
+  selectedPrefix?: string | null;
 }
 
 // ─── Component ────────────────────────────────────────────────
 
-export function ArchitectureTree({ state }: ArchitectureTreeProps) {
+export function ArchitectureTree({ state, onSelectDomain, selectedPrefix }: ArchitectureTreeProps) {
   const { status, tree, systemSource } = state;
 
   // ── Loading ──────────────────────────────────────────────────
@@ -103,6 +107,8 @@ export function ArchitectureTree({ state }: ArchitectureTreeProps) {
               node={section}
               depth={0}
               defaultExpanded
+              onSelectDomain={onSelectDomain}
+              selectedPrefix={selectedPrefix}
             />
           </motion.div>
         ))}

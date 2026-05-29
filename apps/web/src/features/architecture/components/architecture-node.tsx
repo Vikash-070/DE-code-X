@@ -31,15 +31,36 @@ interface ArchitectureNodeProps {
   depth: number;
   /** Whether to start expanded (sections start open by default). */
   defaultExpanded?: boolean;
+  /** Called when the user clicks a domain node. Receives the domain's prefix. */
+  onSelectDomain?: (domainPrefix: string) => void;
+  /** Prefix of the currently-selected domain (for highlight). */
+  selectedPrefix?: string | null;
 }
 
 // ─── Component ────────────────────────────────────────────────
 
-export function ArchitectureNode({ node, depth, defaultExpanded = false }: ArchitectureNodeProps) {
-  const hasChildren = (node.children?.length ?? 0) > 0;
+export function ArchitectureNode({
+  node,
+  depth,
+  defaultExpanded = false,
+  onSelectDomain,
+  selectedPrefix,
+}: ArchitectureNodeProps) {
+  const hasChildren  = (node.children?.length ?? 0) > 0;
+  const isDomainNode = node.type === "domain";
+  const isClickable  = hasChildren || (isDomainNode && !!onSelectDomain);
+  const isSelected   = isDomainNode && !!node.prefix && node.prefix === selectedPrefix;
+
   const [expanded, setExpanded] = useState(defaultExpanded);
 
   const indent = depth * 16; // 16px per depth level
+
+  const handleClick = () => {
+    if (hasChildren) setExpanded(v => !v);
+    if (isDomainNode && node.prefix && onSelectDomain) {
+      onSelectDomain(node.prefix);
+    }
+  };
 
   return (
     <div>
@@ -50,13 +71,15 @@ export function ArchitectureNode({ node, depth, defaultExpanded = false }: Archi
         transition={{ duration: 0.2 }}
         className={cn(
           "group flex items-start gap-2 rounded-xl px-3 py-2.5 transition-colors",
-          hasChildren && "cursor-pointer hover:bg-white/[0.03]",
+          isClickable && "cursor-pointer hover:bg-white/[0.03]",
           depth === 0 && "rounded-2xl border border-white/[0.06] bg-white/[0.02]",
+          isSelected && "border border-blue-500/20 bg-blue-500/5",
         )}
         style={{ paddingLeft: `${indent + 12}px` }}
-        onClick={hasChildren ? () => setExpanded(v => !v) : undefined}
-        role={hasChildren ? "button" : undefined}
+        onClick={isClickable ? handleClick : undefined}
+        role={isClickable ? "button" : undefined}
         aria-expanded={hasChildren ? expanded : undefined}
+        aria-pressed={isDomainNode && isClickable ? isSelected : undefined}
       >
         {/* Icon */}
         <NodeIcon type={node.type} confidence={node.confidence} className="mt-0.5 shrink-0" />
@@ -159,6 +182,8 @@ export function ArchitectureNode({ node, depth, defaultExpanded = false }: Archi
                   node={child}
                   depth={depth + 1}
                   defaultExpanded={child.type === "section"}
+                  onSelectDomain={onSelectDomain}
+                  selectedPrefix={selectedPrefix}
                 />
               ))}
             </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useReverification, useUser } from "@clerk/nextjs";
 import {
   Github,
@@ -155,6 +156,10 @@ export function WorkspaceHomePage() {
   const [isOrchestrating, setOrch]      = useState(false);
   const [cipherState, setCipherState]   = useState<CipherAgentState>(CIPHER_IDLE);
 
+  // Read prefill from URL (?prefill=...) — set by Architecture Workspace "Ask V#" button.
+  const searchParams   = useSearchParams();
+  const prefillMessage = searchParams.get("prefill") ?? undefined;
+
   function handleRepoConfirm(repo: GitHubRepositorySummary) {
     confirmRepository(repo);
     setPhase("initializing");
@@ -194,6 +199,7 @@ export function WorkspaceHomePage() {
           <WorkspaceSession
             onOrchestrationChange={setOrch}
             onCipherStateChange={setCipherState}
+            prefillMessage={prefillMessage}
           />
         </div>
 

@@ -477,12 +477,24 @@ const CipherRow = memo(function CipherRow({ msg }: { msg: CipherMessage }) {
 
 function WorkspaceInput({
   onSubmit,
-  disabled
+  disabled,
+  initialValue = "",
 }: {
-  onSubmit: (text: string) => void;
-  disabled: boolean;
+  onSubmit:      (text: string) => void;
+  disabled:      boolean;
+  /** Pre-fills the input — used when navigating from Architecture Workspace via "Ask V#". */
+  initialValue?: string;
 }) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(initialValue);
+
+  // Sync when initialValue changes (e.g. after URL param is read on first render)
+  const prevInitial = useRef(initialValue);
+  useEffect(() => {
+    if (initialValue && initialValue !== prevInitial.current) {
+      setValue(initialValue);
+      prevInitial.current = initialValue;
+    }
+  }, [initialValue]);
 
   function handleSubmit() {
     const trimmed = value.trim();
@@ -590,7 +602,8 @@ export function VHashSurface({
   isOrchestrating,
   isReferenceMode = false,
   activeRepository,
-  onDirective
+  onDirective,
+  prefillMessage,
 }: {
   messages:          SessionMessage[];
   isOrchestrating:   boolean;
@@ -598,6 +611,8 @@ export function VHashSurface({
   isReferenceMode?:  boolean;
   activeRepository:  GitHubRepositorySummary | null;
   onDirective:       (text: string) => void;
+  /** Pre-fills the chat input. Set when navigating from Architecture Workspace via "Ask V#". */
+  prefillMessage?:   string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const { health, model } = useProviderStatus();
@@ -697,7 +712,7 @@ export function VHashSurface({
         </div>
       </div>
 
-      <WorkspaceInput onSubmit={onDirective} disabled={isOrchestrating} />
+      <WorkspaceInput onSubmit={onDirective} disabled={isOrchestrating} initialValue={prefillMessage} />
     </div>
   );
 }

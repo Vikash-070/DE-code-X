@@ -65,6 +65,11 @@ import {
   buildDomainMap,
   formatDomainMap,
 } from "@/server/repo/domain-map";
+import { matchIntentToAgent }       from "@/server/repo/agent-registry";
+import {
+  getModuleContext,
+  formatModuleContextForPrompt,
+} from "@/server/repo/module-context";
 import { fetchRepoTree, searchTree, type RepoTree }    from "@/services/github/tree";
 import { buildSemanticRetrievalContext }                from "@/services/github/semantic-retrieval";
 import { fetchFileContent }                          from "@/services/github/file";
@@ -1080,6 +1085,45 @@ export async function POST(request: Request) {
           )
           .catch(() => null);
 
+  // Module intelligence — fetch top stored findings for the most relevant
+  // intelligence module (sentinel, pulse, cipher, atlas).
+  //
+  // Only fires for technical, non-reference, non-conversational messages.
+  // matchIntentToAgent() is a fast in-memory substring match (no I/O).
+  // getModuleContext() hits the DB but races a 1s timeout — never blocks the stream.
+  //
+  // When findings exist, they are injected into repositoryContext.moduleIntelligence
+  // so V# can answer questions grounded in persisted analysis.
+  const detectedModule = (
+    !isConversational && !hasReference && repositoryContext.fullName
+  ) ? matchIntentToAgent(message.trim()) : null;
+
+  const moduleIntelligencePromise: Promise<string | null> =
+    detectedModule && repositoryContext.fullName
+      ? Promise.race([
+          (async () => {
+            const [owner, repo] = repositoryContext.fullName.split("/");
+            if (!owner || !repo) return null;
+            const branch  = repositoryContext.defaultBranch ?? "main";
+            const repoFull = `${owner}/${repo}`;
+            const ctx = await getModuleContext(repoFull, branch, detectedModule.agentId);
+            if (!ctx) return null;
+            console.log(
+              `[v# routing] module_context_loaded` +
+              ` module=${ctx.agentId}` +
+              ` findings=${ctx.findings.length}` +
+              ` total=${ctx.totalAvailable}`
+            );
+            return formatModuleContextForPrompt(ctx);
+          })(),
+          new Promise<null>((r) => setTimeout(() => r(null), 1_000)),
+        ]).catch(() => null)
+      : Promise.resolve(null);
+
+  if (detectedModule) {
+    console.log(`[v# routing] intent_match module=${detectedModule.agentId} message_len=${message.trim().length}`);
+  }
+
   // Reference content fetch — runs concurrently, hard 5s cap.
   const referenceContentPromise: Promise<ReferenceContent | null> =
     hasReference
@@ -1117,13 +1161,14 @@ export async function POST(request: Request) {
           setTimeout(() => { dbTimedOut = true; r(null); }, DB_TIMEOUT_MS)
         );
 
-        const [record, codeContext, refContent, systemMap, systemNameContext, architectureTree] = await Promise.all([
+        const [record, codeContext, refContent, systemMap, systemNameContext, architectureTree, moduleIntelligence] = await Promise.all([
           Promise.race([keyPromise, dbTimeoutPromise]),
           codeContextPromise,
           referenceContentPromise,
           systemMapPromise,
           systemNameRetrievalPromise,
           treeForArchitecturePromise,
+          moduleIntelligencePromise,
         ]);
 
         // ── T2.1: v2 system evidence enrichment ───────────────────
@@ -1158,6 +1203,19 @@ export async function POST(request: Request) {
           if (formattedDomainMap) {
             repositoryContext.domainMap = formattedDomainMap;
           }
+        }
+
+        // ── V# module routing: inject stored intelligence findings ────────────────
+        // When a module matched the user's intent AND findings were found,
+        // inject them into repositoryContext so the system prompt includes
+        // grounded findings from the detected module.
+        if (moduleIntelligence) {
+          repositoryContext.moduleIntelligence = moduleIntelligence;
+          console.log(
+            `[v# routing] module_intelligence_injected` +
+            ` module=${detectedModule?.agentId ?? "unknown"}` +
+            ` chars=${moduleIntelligence.length}`
+          );
         }
 
         // activeCodeContext: use normal retrieval first; fall back to system-name retrieval.
@@ -1218,7 +1276,9 @@ export async function POST(request: Request) {
           ` semantic=${semanticContext ? `yes(${semanticContext.folderListing?.length ?? 0})` : "no"}` +
           ` ref_fetched=${!!refContent}` +
           ` system_map=${enrichedSystemMap ? `${enrichedSystemMap.systems.length}_systems` : "none"}` +
-          ` arch_tree=${architectureTree ? "hit" : "miss"}`
+          ` arch_tree=${architectureTree ? "hit" : "miss"}` +
+          ` module=${detectedModule?.agentId ?? "none"}` +
+          ` module_ctx=${moduleIntelligence ? "yes" : "no"}`
         );
 
         if (refContent) {

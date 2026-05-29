@@ -40,6 +40,19 @@ export interface RepoContextInput {
    * Example: "Heavy: Feature Modules (47 files), API Routes (31 files)"
    */
   domainMap?: string;
+  /**
+   * Module intelligence context — top stored findings from the intelligence module
+   * most relevant to the user's current message.
+   *
+   * Populated by matchIntentToAgent() + getModuleContext() in orchestrate/route.ts.
+   * Absent for conversational messages and when no findings are stored yet.
+   * Pre-formatted by formatModuleContextForPrompt() from module-context.ts.
+   *
+   * Example:
+   *   "=== Sentinel Intelligence — 3 stored security findings ===
+   *   • route.ts — SQL injection risk (confirmed, line 42): ..."
+   */
+  moduleIntelligence?: string;
 }
 
 // ─── System map formatting ────────────────────────────────────
@@ -141,6 +154,12 @@ export function buildVHashSystemPrompt(ctx: RepoContextInput): string {
     // so it can answer "what auth files are there?" without explicit file path mentions.
     ctx.domainMap
       ? `\n${ctx.domainMap}\n\nDomain map constraint: The domain names above are structural — they reflect directory layout, not file semantics. You know WHICH domains exist and their size. You do NOT know exact file names unless you have retrieved them. When the user asks about files in a domain, use the domain name to reason directionally (e.g. "there are 12 files in the Auth Layer domain") but say you need to retrieve the specific files to go deeper.`
+      : null,
+    // Module intelligence — top stored findings from the most relevant intelligence module.
+    // Injected when the user's message matches a module's intentPatterns (sentinel, pulse, etc.).
+    // Grounds V# answers in persisted analysis rather than generic reasoning.
+    ctx.moduleIntelligence
+      ? `\n${ctx.moduleIntelligence}\n\nModule intelligence constraint: The findings above are from stored analysis of actual source files. Use them as ground truth. If the user asks about a finding, reason from the stored evidence. If no findings are listed for a topic, say the relevant files haven't been analyzed yet.`
       : null,
   ]
     .filter(Boolean)

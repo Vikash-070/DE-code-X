@@ -133,9 +133,12 @@ function detectFilePath(text: string): string | null {
 export function WorkspaceSession({
   onOrchestrationChange,
   onCipherStateChange,
+  prefillMessage,
 }: {
   onOrchestrationChange?: (orchestrating: boolean) => void;
   onCipherStateChange?:   (state: CipherAgentState) => void;
+  /** Pre-fills the chat input. Passed from Architecture Workspace "Ask V#" button. */
+  prefillMessage?: string;
 } = {}) {
   const { activeRepository } = useActiveRepository();
 
@@ -483,6 +486,7 @@ export function WorkspaceSession({
         isReferenceMode={isReferenceMode}
         activeRepository={activeRepository}
         onDirective={handleDirective}
+        prefillMessage={prefillMessage}
       />
     </div>
   );
