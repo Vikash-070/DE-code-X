@@ -53,7 +53,51 @@ export interface RepoContextInput {
    *   • route.ts — SQL injection risk (confirmed, line 42): ..."
    */
   moduleIntelligence?: string;
+  /**
+   * Gap synthesis: set true when the user asked a capability-gap question
+   * ("what am I missing?") but NO stored intelligence exists for this repo yet.
+   *
+   * When set, buildVHashSystemPrompt() injects a "run Atlas first" directive
+   * instead of letting V# guess at gaps from nothing (Decision #15).
+   * Populated by orchestrate/route.ts.
+   */
+  gapNoData?: boolean;
 }
+
+// ─── Gap synthesis ────────────────────────────────────────────
+
+/**
+ * Count "=== <Module> ===" headers in a formatted module-intelligence block.
+ * getMultiModuleContext() emits one header per module that returned findings,
+ * so 2+ headers means the block spans multiple modules → gap-synthesis mode.
+ */
+function countModuleHeaders(moduleIntelligence: string): number {
+  const matches = moduleIntelligence.match(/^=== /gm);
+  return matches ? matches.length : 0;
+}
+
+/**
+ * Directive appended when module intelligence spans 2+ modules. Switches V#
+ * into capability-gap synthesis with a fixed response schema (Decision #17):
+ * verdict → gaps → why. Conditional on 2+ headers so it never fires on an
+ * ordinary single-module question (Decision #10).
+ */
+const GAP_SYNTHESIS_DIRECTIVE = `
+Gap synthesis mode: The findings above span multiple intelligence modules. The user is asking what their codebase is MISSING — capability gaps — not what it already has. Synthesize across the modules to find patterns or protections that SHOULD exist given this architecture but are absent from the evidence.
+
+Structure your response in exactly three parts:
+1. Verdict — one line naming the single most important gap (or state there are no critical gaps if the evidence genuinely shows coverage).
+2. Gaps — a bulleted list. For each gap: what is missing, and which module's evidence (or lack of it) points to it.
+3. Why it matters — one sentence per gap on the concrete risk of leaving it open.
+
+Only call something a gap when the findings genuinely lack evidence of it. If you cannot confirm absence from the evidence, label it "worth verifying" rather than "missing". Never invent file paths. Confirming absence is harder than confirming presence — stay honest about confidence.`;
+
+/**
+ * Directive used when a gap question arrives but no stored intelligence exists.
+ * V# must not fabricate gaps from an empty repository (Decision #15).
+ */
+const GAP_NO_DATA_DIRECTIVE = `
+Gap analysis requested, but no stored intelligence exists for this repository yet. Do NOT guess what is missing — you have no evidence to reason from. In 2-3 sentences: explain that mapping capability gaps requires analyzing the codebase first, and direct the user to run Atlas (the architecture map) — and optionally Sentinel and Pulse — then ask again. Offer to start by pointing them at a key file to analyze. Do not list speculative gaps.`;
 
 // ─── System map formatting ────────────────────────────────────
 
@@ -161,6 +205,13 @@ export function buildVHashSystemPrompt(ctx: RepoContextInput): string {
     ctx.moduleIntelligence
       ? `\n${ctx.moduleIntelligence}\n\nModule intelligence constraint: The findings above are from stored analysis of actual source files. Use them as ground truth. If the user asks about a finding, reason from the stored evidence. If no findings are listed for a topic, say the relevant files haven't been analyzed yet.`
       : null,
+    // Gap synthesis directive — only when module intelligence spans 2+ modules.
+    // Switches V# into capability-gap mode with the verdict→gaps→why schema.
+    ctx.moduleIntelligence && countModuleHeaders(ctx.moduleIntelligence) >= 2
+      ? GAP_SYNTHESIS_DIRECTIVE
+      : null,
+    // Null-Atlas handling — gap question asked but no stored analysis exists.
+    ctx.gapNoData ? GAP_NO_DATA_DIRECTIVE : null,
   ]
     .filter(Boolean)
     .join("\n");

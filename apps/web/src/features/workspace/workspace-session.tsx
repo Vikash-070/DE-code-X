@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useActiveRepository }             from "@/contexts/repository-context";
+import { detectGapIntent }                 from "@/server/repo/agent-registry";
 import type { GitHubRepositorySummary }    from "@/services/github/types";
 import { extractReferenceUrl }             from "@/services/reference/url-parser";
 import type { AgentResult, CipherFinding } from "@/types/intelligence";
@@ -69,6 +70,21 @@ export type SessionMessage =
   | AssistantMessage
   | VHashMessage
   | CipherMessage;
+
+// ─── Gap-analysis suggestion chips ───────────────────────
+
+/** Starter chips — shown on a fresh session to surface gap analysis. */
+const GAP_STARTER_CHIPS = [
+  "What am I missing?",
+  "What patterns am I lacking?",
+] as const;
+
+/** Follow-up chips — shown after a gap-synthesis response completes. */
+const GAP_FOLLOWUP_CHIPS = [
+  "What should I fix first?",
+  "Show me the security gaps",
+  "Where should I start?",
+] as const;
 
 // ─── Helpers ─────────────────────────────────────────────
 
@@ -148,6 +164,8 @@ export function WorkspaceSession({
   const [isOrchestrating,  setIsOrchestrating]  = useState(false);
   const [isReferenceMode,  setIsReferenceMode]   = useState(false);
   const [cipherState,      setCipherStateLocal]  = useState<CipherAgentState>(CIPHER_IDLE);
+  // True after a capability-gap question completes — drives follow-up chips.
+  const [gapFollowUpsActive, setGapFollowUpsActive] = useState(false);
 
   const mountedRef             = useRef(true);
   const readerRef              = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -175,6 +193,7 @@ export function WorkspaceSession({
       setMessages([buildOpeningBriefing(activeRepository)]);
       processedForCipherRef.current.clear();
       setCipherState(CIPHER_IDLE);
+      setGapFollowUpsActive(false);
     }
   }, [activeRepository?.fullName]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -325,6 +344,11 @@ export function WorkspaceSession({
 
       // ── User message ─────────────────────────────────────
       const referenceUrl = extractReferenceUrl(text.trim()) ?? undefined;
+      // Detect gap intent up front so we can show follow-up chips once the
+      // response completes. Mirrors the server's detectGapIntent() routing.
+      const isGapQuery = !referenceUrl && detectGapIntent(text.trim());
+      // Clear any previous follow-ups while this turn streams.
+      setGapFollowUpsActive(false);
       const userMsg: UserMessage = {
         id:      uid(),
         role:    "user",
@@ -442,6 +466,8 @@ export function WorkspaceSession({
                 : m
             )
           );
+          // Gap question answered → surface follow-up chips for the next move.
+          if (isGapQuery) setGapFollowUpsActive(true);
         }
       } catch (err) {
         if (!mountedRef.current) return;
@@ -478,6 +504,19 @@ export function WorkspaceSession({
     [activeRepository, isOrchestrating, messages, triggerCipher]
   );
 
+  // ── Gap-analysis suggestion chips ─────────────────────────
+  // Follow-up chips after a gap answer take priority. Otherwise, on a fresh
+  // session (only the opening briefing present), show starter chips to make
+  // gap analysis discoverable. A repo with no Atlas data is handled gracefully
+  // by the server ("run Atlas first"), so the starter chip is never a dead end.
+  const suggestions: string[] = (() => {
+    if (!activeRepository || isOrchestrating) return [];
+    if (gapFollowUpsActive) return [...GAP_FOLLOWUP_CHIPS];
+    const conversationStarted = messages.some((m) => m.role === "user");
+    if (!conversationStarted) return [...GAP_STARTER_CHIPS];
+    return [];
+  })();
+
   return (
     <div className="h-full overflow-hidden rounded-2xl border border-white/[0.05]">
       <VHashSurface
@@ -487,6 +526,7 @@ export function WorkspaceSession({
         activeRepository={activeRepository}
         onDirective={handleDirective}
         prefillMessage={prefillMessage}
+        suggestions={suggestions}
       />
     </div>
   );

@@ -28,6 +28,8 @@ import type { AgentId, CipherFinding } from "@/types/intelligence";
 export interface ModuleContextFinding {
   filePath: string;
   finding:  CipherFinding;
+  /** When the source record was last analyzed — drives staleness annotation. */
+  analyzedAt: Date;
 }
 
 export interface ModuleContextResult {
@@ -44,6 +46,36 @@ const CONFIDENCE_RANK: Record<string, number> = {
   inferred:    2,
   speculative: 1,
 };
+
+// ─── Staleness ────────────────────────────────────────────────
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Findings older than this (in days) get a "(analyzed N days ago)" annotation
+ * in the prompt so V# can weight fresh evidence over stale evidence.
+ *
+ * Default 14 days. Override with MODULE_CONTEXT_STALENESS_DAYS (Decision #8).
+ * Findings are annotated, NOT dropped — stale evidence is still evidence,
+ * V# just needs to know its age.
+ */
+function stalenessMaxAgeDays(): number {
+  const raw = Number(process.env.MODULE_CONTEXT_STALENESS_DAYS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 14;
+}
+
+/**
+ * Returns a " (analyzed N days ago)" suffix when the finding is older than the
+ * staleness window, or "" when it is fresh. Pure — clock injected for tests.
+ */
+export function stalenessAnnotation(
+  analyzedAt: Date,
+  now:        number = Date.now(),
+  maxAgeDays: number = stalenessMaxAgeDays()
+): string {
+  const ageDays = Math.floor((now - new Date(analyzedAt).getTime()) / MS_PER_DAY);
+  return ageDays > maxAgeDays ? ` (analyzed ${ageDays} days ago)` : "";
+}
 
 // ─── Fetcher ───────────────────────────────────────────────────
 
@@ -63,18 +95,30 @@ export async function getModuleContext(
     const records = await prisma.fileIntelligence.findMany({
       where:   { repoFullName, branch, agentId },
       orderBy: { analyzedAt: "desc" },
-      select:  { filePath: true, findings: true },
+      select:  { filePath: true, findings: true, analyzedAt: true },
       take:    50, // fetch more than `limit` so we can sort by confidence across files
     });
 
     if (!records.length) return null;
 
+    // ── filePath dedup (Decision #9) ──────────────────────────
+    // Re-analysis can leave multiple rows for the same filePath. Records are
+    // ordered analyzedAt desc, so the FIRST occurrence of a path is the most
+    // recent — keep it and drop older duplicates. Without this, a single file
+    // can contribute mixed stale + fresh findings to the same answer.
+    const seenPaths = new Set<string>();
+    const freshest = records.filter((r) => {
+      if (seenPaths.has(r.filePath)) return false;
+      seenPaths.add(r.filePath);
+      return true;
+    });
+
     // Flatten all findings with their file paths
     const all: ModuleContextFinding[] = [];
-    for (const record of records) {
+    for (const record of freshest) {
       const findings = record.findings as unknown as CipherFinding[];
       for (const f of findings) {
-        all.push({ filePath: record.filePath, finding: f });
+        all.push({ filePath: record.filePath, finding: f, analyzedAt: record.analyzedAt });
       }
     }
 
@@ -125,14 +169,16 @@ export function formatModuleContextForPrompt(ctx: ModuleContextResult): string {
   const shown      = ctx.findings;
   const remaining  = ctx.totalAvailable - shown.length;
 
-  const lines = shown.map(({ filePath, finding }) => {
+  const lines = shown.map(({ filePath, finding, analyzedAt }) => {
     const fileName  = filePath.split("/").pop() ?? filePath;
     const lineRef   = finding.evidenceLines
       ? `, line ${finding.evidenceLines.start}`
       : "";
     // Truncate description to 80 chars to stay token-efficient
     const desc = finding.description.slice(0, 80).trimEnd();
-    return `• ${fileName} — ${finding.title} (${finding.confidence}${lineRef}): ${desc}`;
+    // Staleness annotation — empty for fresh findings, "(analyzed N days ago)" for old ones.
+    const stale = stalenessAnnotation(analyzedAt);
+    return `• ${fileName} — ${finding.title} (${finding.confidence}${lineRef}): ${desc}${stale}`;
   });
 
   const header  = `=== ${moduleName} — ${ctx.totalAvailable} stored finding${ctx.totalAvailable !== 1 ? "s" : ""} ===`;
@@ -141,4 +187,56 @@ export function formatModuleContextForPrompt(ctx: ModuleContextResult): string {
     : "";
 
   return [header, ...lines, ...(footer ? [footer] : [])].join("\n");
+}
+
+// ─── Multi-module context (gap synthesis) ─────────────────────
+
+/**
+ * Default module set for capability-gap synthesis.
+ * Atlas (architecture shape) + Sentinel (security) + Pulse (performance)
+ * together give V# enough cross-cutting signal to reason about what a
+ * codebase is MISSING, not just what it contains.
+ */
+export const GAP_SYNTHESIS_MODULES: AgentId[] = ["atlas", "sentinel", "pulse"];
+
+/**
+ * Fetch and concatenate stored findings across multiple intelligence modules
+ * for cross-module gap synthesis (Decision #7).
+ *
+ * Each module is loaded with getModuleContext() (which already applies filePath
+ * dedup), then formatted and joined with blank lines. The result is a single
+ * block with one "=== <Module> — N stored findings ===" header per module that
+ * returned findings — buildVHashSystemPrompt() counts those headers to decide
+ * whether to switch into gap-synthesis mode.
+ *
+ * Behaviour:
+ *   - All modules return findings → block with one header per module.
+ *   - Partial (some modules empty) → block with only the modules that had data.
+ *   - All modules empty → returns null (caller injects the "run Atlas first"
+ *     directive rather than an empty intelligence block).
+ *
+ * The three reads run in parallel (Promise.all). Returns null on any failure —
+ * gap synthesis degrades to V#'s normal reasoning, never a 500.
+ */
+export async function getMultiModuleContext(
+  repoFullName:   string,
+  branch:         string,
+  agentIds:       AgentId[] = GAP_SYNTHESIS_MODULES,
+  limitPerModule  = 5
+): Promise<string | null> {
+  try {
+    const results = await Promise.all(
+      agentIds.map((id) => getModuleContext(repoFullName, branch, id, limitPerModule))
+    );
+
+    const blocks = results
+      .filter((r): r is ModuleContextResult => r !== null)
+      .map((r) => formatModuleContextForPrompt(r));
+
+    if (!blocks.length) return null;
+
+    return blocks.join("\n\n");
+  } catch {
+    return null;
+  }
 }

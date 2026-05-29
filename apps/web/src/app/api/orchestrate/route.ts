@@ -65,10 +65,12 @@ import {
   buildDomainMap,
   formatDomainMap,
 } from "@/server/repo/domain-map";
-import { matchIntentToAgent }       from "@/server/repo/agent-registry";
+import { matchIntentToAgent, detectGapIntent } from "@/server/repo/agent-registry";
 import {
   getModuleContext,
+  getMultiModuleContext,
   formatModuleContextForPrompt,
+  GAP_SYNTHESIS_MODULES,
 } from "@/server/repo/module-context";
 import { fetchRepoTree, searchTree, type RepoTree }    from "@/services/github/tree";
 import { buildSemanticRetrievalContext }                from "@/services/github/semantic-retrieval";
@@ -1094,19 +1096,50 @@ export async function POST(request: Request) {
   //
   // When findings exist, they are injected into repositoryContext.moduleIntelligence
   // so V# can answer questions grounded in persisted analysis.
-  const detectedModule = (
-    !isConversational && !hasReference && repositoryContext.fullName
-  ) ? matchIntentToAgent(message.trim()) : null;
+  const routingEligible = !isConversational && !hasReference && !!repositoryContext.fullName;
+
+  // Gap synthesis: "what am I missing?" asks what the codebase LACKS. It needs
+  // cross-module context (Atlas + Sentinel + Pulse), not a single module.
+  // detectGapIntent() is a separate signal from matchIntentToAgent() so it fires
+  // whether intent matching lands on Forge (a phrase match) or returns null
+  // (an unusual phrasing) — Decision #11.
+  const isGapQuery    = routingEligible ? detectGapIntent(message.trim()) : false;
+  const detectedModule = routingEligible ? matchIntentToAgent(message.trim()) : null;
+
+  // gapNoData is resolved alongside the context (we can't know until the DB read
+  // returns whether any findings exist). We thread it back via the same promise
+  // by returning a discriminated result.
+  let gapNoData = false;
 
   const moduleIntelligencePromise: Promise<string | null> =
-    detectedModule && repositoryContext.fullName
+    repositoryContext.fullName && (isGapQuery || detectedModule)
       ? Promise.race([
           (async () => {
             const [owner, repo] = repositoryContext.fullName.split("/");
             if (!owner || !repo) return null;
             const branch  = repositoryContext.defaultBranch ?? "main";
             const repoFull = `${owner}/${repo}`;
-            const ctx = await getModuleContext(repoFull, branch, detectedModule.agentId);
+
+            // ── Gap synthesis path: multi-module context ─────────────
+            if (isGapQuery) {
+              const multi = await getMultiModuleContext(repoFull, branch, GAP_SYNTHESIS_MODULES);
+              if (!multi) {
+                // No stored intelligence at all — flag for the "run Atlas first"
+                // directive instead of letting V# invent gaps from nothing.
+                gapNoData = true;
+                console.log(`[v# routing] gap_synthesis no_data repo=${repoFull}`);
+                return null;
+              }
+              console.log(
+                `[v# routing] gap_synthesis_loaded` +
+                ` modules=${GAP_SYNTHESIS_MODULES.join("+")}` +
+                ` chars=${multi.length}`
+              );
+              return multi;
+            }
+
+            // ── Single-module path (existing behaviour) ──────────────
+            const ctx = await getModuleContext(repoFull, branch, detectedModule!.agentId);
             if (!ctx) return null;
             console.log(
               `[v# routing] module_context_loaded` +
@@ -1116,11 +1149,15 @@ export async function POST(request: Request) {
             );
             return formatModuleContextForPrompt(ctx);
           })(),
-          new Promise<null>((r) => setTimeout(() => r(null), 1_000)),
+          // Gap synthesis fans out 3 parallel reads — give it a 2s budget;
+          // single-module reads keep the original 1s cap.
+          new Promise<null>((r) => setTimeout(() => r(null), isGapQuery ? 2_000 : 1_000)),
         ]).catch(() => null)
       : Promise.resolve(null);
 
-  if (detectedModule) {
+  if (isGapQuery) {
+    console.log(`[v# routing] gap_intent_match message_len=${message.trim().length}`);
+  } else if (detectedModule) {
     console.log(`[v# routing] intent_match module=${detectedModule.agentId} message_len=${message.trim().length}`);
   }
 
@@ -1213,9 +1250,15 @@ export async function POST(request: Request) {
           repositoryContext.moduleIntelligence = moduleIntelligence;
           console.log(
             `[v# routing] module_intelligence_injected` +
-            ` module=${detectedModule?.agentId ?? "unknown"}` +
+            ` mode=${isGapQuery ? "gap" : "single"}` +
+            ` module=${isGapQuery ? GAP_SYNTHESIS_MODULES.join("+") : (detectedModule?.agentId ?? "unknown")}` +
             ` chars=${moduleIntelligence.length}`
           );
+        } else if (isGapQuery && gapNoData) {
+          // Gap question with no stored analysis → tell V# to run Atlas first
+          // rather than answer from an empty intelligence block (Decision #15).
+          repositoryContext.gapNoData = true;
+          console.log(`[v# routing] gap_no_data_directive_injected repo=${repositoryContext.fullName}`);
         }
 
         // activeCodeContext: use normal retrieval first; fall back to system-name retrieval.

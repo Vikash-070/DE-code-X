@@ -18,6 +18,26 @@ const { describe, it, expect } = (globalThis as unknown as {
   expect: typeof import("vitest")["expect"];
 });
 
+// ─── Gap Analysis v1 — real import-safe modules + fixtures ────────────────────
+// agent-registry and vhash-prompt have type-only dependencies, so they are safe
+// to import in a unit test (no Prisma instantiation). module-context is coupled
+// to Prisma at import time; its pure logic is mirrored further below.
+import { detectGapIntent, matchIntentToAgent as realMatchIntentToAgent } from "@/server/repo/agent-registry";
+import { buildVHashSystemPrompt } from "@/server/ai/vhash-prompt";
+import {
+  ATLAS_RECORDS,
+  SENTINEL_RECORDS,
+  PULSE_RECORDS,
+  ALL_MODULE_RECORDS,
+  type FixtureRecord,
+} from "./fixtures/multi-module-context";
+import {
+  FIXED_NOW,
+  STALE_ANALYZED_AT,
+  FRESH_ANALYZED_AT,
+} from "./fixtures/stale-finding";
+import { DUPLICATE_FILE_RECORDS } from "./fixtures/duplicate-file-records";
+
 // ─── Shared types ────────────────────────────────────────────
 
 interface CipherFinding {
@@ -450,5 +470,239 @@ describe("Test 9: V# routing — intent to module matching", () => {
     const result = matchIntentToAgent("is this authentication code safe from injection attacks?");
     // "authentication" + "injection" + "safe" → sentinel score ≥ 2
     expect(result?.agentId).toBe("sentinel");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Gap Analysis v1 — 10 gap-synthesis tests + 3 fixtures
+//
+// Scope: Forge gap intent phrases · getMultiModuleContext() · gap synthesis
+// routing · response schema · staleness filtering · filePath dedup ·
+// null-Atlas handling. Eval criteria: zero false positives on intent routing;
+// gap response follows verdict → gaps → why; no crash on null Atlas context.
+//
+// Real import-safe modules are imported directly where safe (agent-registry
+// has type-only deps; vhash-prompt has type-only deps). module-context is
+// coupled to Prisma at import time, so its pure logic (multi-module assembly,
+// staleness, dedup) is mirrored inline against fixtures — matching the
+// self-contained convention used throughout this file.
+// (Real imports + fixtures are declared at the top of this file.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Mirrored module-context pure logic (source: server/repo/module-context.ts) ──
+// Kept in lock-step with the real implementation. If module-context.ts changes
+// its dedup/format/staleness behaviour, update these mirrors too.
+
+const CONFIDENCE_RANK: Record<string, number> = { confirmed: 3, inferred: 2, speculative: 1 };
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const MODULE_DISPLAY_NAME: Record<string, string> = {
+  cipher:   "Cipher (code quality)",
+  sentinel: "Sentinel (security)",
+  pulse:    "Pulse (performance)",
+  atlas:    "Atlas (architecture)",
+  forge:    "Forge (implementation plan)",
+};
+
+function mirrorStaleness(analyzedAt: Date, now = FIXED_NOW, maxAgeDays = 14): string {
+  const ageDays = Math.floor((now - new Date(analyzedAt).getTime()) / MS_PER_DAY);
+  return ageDays > maxAgeDays ? ` (analyzed ${ageDays} days ago)` : "";
+}
+
+interface FlatFinding { filePath: string; finding: FixtureRecord["findings"][number]; analyzedAt: string; }
+
+/** Mirrors getModuleContext(): dedup by filePath (records already analyzedAt-desc),
+ *  flatten, sort by confidence desc, take(limit). Returns null when empty. */
+function mirrorGetModuleContext(records: FixtureRecord[], limit = 5) {
+  if (!records.length) return null;
+  const seen = new Set<string>();
+  const freshest = records.filter((r) => {
+    if (seen.has(r.filePath)) return false;
+    seen.add(r.filePath);
+    return true;
+  });
+  const all: FlatFinding[] = [];
+  for (const r of freshest) for (const f of r.findings) all.push({ filePath: r.filePath, finding: f, analyzedAt: r.analyzedAt });
+  if (!all.length) return null;
+  const sorted = all.sort((a, b) =>
+    (CONFIDENCE_RANK[b.finding.confidence] ?? 0) - (CONFIDENCE_RANK[a.finding.confidence] ?? 0));
+  return { agentId: freshest[0]!.agentId, findings: sorted.slice(0, limit), totalAvailable: all.length };
+}
+
+/** Mirrors formatModuleContextForPrompt(): header starts "=== <Module> — N stored finding(s) ===". */
+function mirrorFormat(ctx: NonNullable<ReturnType<typeof mirrorGetModuleContext>>): string {
+  const moduleName = MODULE_DISPLAY_NAME[ctx.agentId] ?? ctx.agentId;
+  const lines = ctx.findings.map(({ filePath, finding, analyzedAt }) => {
+    const fileName = filePath.split("/").pop() ?? filePath;
+    const lineRef  = finding.evidenceLines ? `, line ${finding.evidenceLines.start}` : "";
+    const desc     = finding.description.slice(0, 80).trimEnd();
+    const stale    = mirrorStaleness(new Date(analyzedAt));
+    return `• ${fileName} — ${finding.title} (${finding.confidence}${lineRef}): ${desc}${stale}`;
+  });
+  const header = `=== ${moduleName} — ${ctx.totalAvailable} stored finding${ctx.totalAvailable !== 1 ? "s" : ""} ===`;
+  return [header, ...lines].join("\n");
+}
+
+/** Mirrors getMultiModuleContext(): format each non-null module, join with blank lines, null if none. */
+function mirrorGetMultiModuleContext(recordSets: FixtureRecord[][]): string | null {
+  const blocks = recordSets
+    .map((rs) => mirrorGetModuleContext(rs))
+    .filter((r): r is NonNullable<typeof r> => r !== null)
+    .map((r) => mirrorFormat(r));
+  return blocks.length ? blocks.join("\n\n") : null;
+}
+
+// ─── Gap Test 1: detectGapIntent recognises gap questions ─────────────────────
+
+describe("Gap Test 1: detectGapIntent — recognises capability-gap questions", () => {
+  it("'what am I missing?' → true", () => {
+    expect(detectGapIntent("what am I missing?")).toBe(true);
+  });
+  it("'What patterns am I lacking?' → true", () => {
+    expect(detectGapIntent("What patterns am I lacking?")).toBe(true);
+  });
+  it("'show me the gap analysis' → true", () => {
+    expect(detectGapIntent("show me the gap analysis")).toBe(true);
+  });
+});
+
+// ─── Gap Test 2: detectGapIntent — zero false positives ───────────────────────
+
+describe("Gap Test 2: detectGapIntent — no false positives on ordinary questions", () => {
+  it("'how is this repo organized?' → false (Atlas question, not a gap)", () => {
+    expect(detectGapIntent("how is this repo organized?")).toBe(false);
+  });
+  it("'what are the security issues?' → false (Sentinel question)", () => {
+    expect(detectGapIntent("what are the security issues?")).toBe(false);
+  });
+  it("'hi there' → false", () => {
+    expect(detectGapIntent("hi there")).toBe(false);
+  });
+});
+
+// ─── Gap Test 3: gap phrases route to Forge via matchIntentToAgent ────────────
+
+describe("Gap Test 3: matchIntentToAgent — gap phrases delegate to Forge", () => {
+  it("'what am I missing?' → forge", () => {
+    expect(realMatchIntentToAgent("what am I missing?")?.agentId).toBe("forge");
+  });
+  it("'what should I add?' → forge", () => {
+    expect(realMatchIntentToAgent("what should I add?")?.agentId).toBe("forge");
+  });
+  it("gap intent does NOT route to Atlas (which owns plain architecture)", () => {
+    const result = realMatchIntentToAgent("what patterns am I missing?");
+    expect(result?.agentId).toBe("forge");
+    expect(result?.agentId).not.toBe("atlas");
+  });
+});
+
+// ─── Gap Test 4: getMultiModuleContext — all 3 modules present ────────────────
+
+describe("Gap Test 4: multi-module context — all modules contribute headers", () => {
+  it("emits one '=== <Module>' header per module (Atlas, Sentinel, Pulse)", () => {
+    const block = mirrorGetMultiModuleContext([ATLAS_RECORDS, SENTINEL_RECORDS, PULSE_RECORDS]);
+    expect(block).not.toBeNull();
+    expect(block).toContain("=== Atlas (architecture)");
+    expect(block).toContain("=== Sentinel (security)");
+    expect(block).toContain("=== Pulse (performance)");
+    // Exactly 3 module headers
+    const headers = block!.match(/^=== /gm)?.length ?? 0;
+    expect(headers).toBe(3);
+  });
+
+  it("ALL_MODULE_RECORDS fixture covers all three gap-synthesis modules", () => {
+    const agents = new Set(ALL_MODULE_RECORDS.map((r) => r.agentId));
+    expect(agents.has("atlas")).toBe(true);
+    expect(agents.has("sentinel")).toBe(true);
+    expect(agents.has("pulse")).toBe(true);
+  });
+});
+
+// ─── Gap Test 5: getMultiModuleContext — partial coverage ────────────────────
+
+describe("Gap Test 5: multi-module context — partial coverage shows only present modules", () => {
+  it("only Sentinel has data → exactly one header, no Atlas/Pulse headers", () => {
+    const block = mirrorGetMultiModuleContext([[], SENTINEL_RECORDS, []]);
+    expect(block).not.toBeNull();
+    expect(block).toContain("=== Sentinel (security)");
+    expect(block).not.toContain("=== Atlas");
+    expect(block).not.toContain("=== Pulse");
+    const headers = block!.match(/^=== /gm)?.length ?? 0;
+    expect(headers).toBe(1);
+  });
+});
+
+// ─── Gap Test 6: getMultiModuleContext — all empty → null (null-Atlas path) ───
+
+describe("Gap Test 6: multi-module context — all modules empty returns null", () => {
+  it("no stored findings anywhere → null (caller sets gapNoData)", () => {
+    const block = mirrorGetMultiModuleContext([[], [], []]);
+    expect(block).toBeNull();
+  });
+});
+
+// ─── Gap Test 7: staleness annotation ────────────────────────────────────────
+
+describe("Gap Test 7: staleness — old findings annotated, fresh findings clean", () => {
+  it("20-day-old finding → '(analyzed 20 days ago)'", () => {
+    expect(mirrorStaleness(STALE_ANALYZED_AT)).toBe(" (analyzed 20 days ago)");
+  });
+  it("2-day-old finding → no annotation", () => {
+    expect(mirrorStaleness(FRESH_ANALYZED_AT)).toBe("");
+  });
+});
+
+// ─── Gap Test 8: filePath dedup keeps the most recent record ──────────────────
+
+describe("Gap Test 8: filePath dedup — most-recent record wins", () => {
+  it("two rows for same filePath collapse to one; newest finding survives", () => {
+    const ctx = mirrorGetModuleContext(DUPLICATE_FILE_RECORDS);
+    expect(ctx).not.toBeNull();
+    // Only the newest row's finding remains
+    expect(ctx!.findings.length).toBe(1);
+    expect(ctx!.findings[0]!.finding.id).toBe("new1");
+    expect(ctx!.findings[0]!.finding.title).toBe("NEW finding");
+    // Older row dropped entirely
+    expect(ctx!.findings.some((f) => f.finding.id === "old1")).toBe(false);
+  });
+});
+
+// ─── Gap Test 9: gap synthesis directive fires on 2+ module headers ───────────
+
+describe("Gap Test 9: V# prompt — gap synthesis directive on 2+ modules", () => {
+  const baseCtx = { fullName: "owner/repo", name: "repo", language: "TypeScript" };
+
+  it("2+ module headers → 'Gap synthesis mode' directive with verdict→gaps→why schema", () => {
+    const moduleIntelligence = mirrorGetMultiModuleContext([ATLAS_RECORDS, SENTINEL_RECORDS, PULSE_RECORDS])!;
+    const prompt = buildVHashSystemPrompt({ ...baseCtx, moduleIntelligence });
+    expect(prompt).toContain("Gap synthesis mode");
+    expect(prompt).toContain("Verdict");
+    expect(prompt).toContain("Gaps");
+    expect(prompt).toContain("Why it matters");
+  });
+
+  it("single-module context → does NOT enter gap synthesis mode", () => {
+    const moduleIntelligence = mirrorGetMultiModuleContext([SENTINEL_RECORDS])!;
+    const prompt = buildVHashSystemPrompt({ ...baseCtx, moduleIntelligence });
+    expect(prompt).not.toContain("Gap synthesis mode");
+  });
+});
+
+// ─── Gap Test 10: null-Atlas handling — gapNoData directive ──────────────────
+
+describe("Gap Test 10: V# prompt — null-Atlas graceful degradation", () => {
+  const baseCtx = { fullName: "owner/repo", name: "repo", language: "TypeScript" };
+
+  it("gapNoData=true → 'run Atlas first' directive, no speculative gaps", () => {
+    const prompt = buildVHashSystemPrompt({ ...baseCtx, gapNoData: true });
+    expect(prompt).toContain("no stored intelligence exists");
+    expect(prompt).toContain("Atlas");
+    // It must instruct V# NOT to guess
+    expect(prompt.toLowerCase()).toContain("do not guess");
+  });
+
+  it("no gap flags at all → neither gap directive present (ordinary prompt)", () => {
+    const prompt = buildVHashSystemPrompt(baseCtx);
+    expect(prompt).not.toContain("Gap synthesis mode");
+    expect(prompt).not.toContain("no stored intelligence exists");
   });
 });

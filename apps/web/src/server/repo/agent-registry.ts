@@ -134,6 +134,27 @@ export const AGENT_REGISTRY: Record<AgentId, AgentConfig> = {
       "next steps",
       "where to start",
       "action items",
+      // ── Gap-analysis intent (v1) ───────────────────────────────
+      // Gap questions ask what the codebase is MISSING. Forge is the
+      // semantically correct host: it already aggregates findings across
+      // modules to produce an action from the whole picture. These phrases
+      // route gap queries here; orchestrate/route.ts detects the same intent
+      // via detectGapIntent() and injects multi-module context for synthesis.
+      "what am i missing",
+      "what's missing",
+      "whats missing",
+      "what am i lacking",
+      "what patterns am i lacking",
+      "what patterns am i missing",
+      "what should i add",
+      "what don't i have",
+      "what dont i have",
+      "capability gap",
+      "capability gaps",
+      "gap analysis",
+      "missing capabilities",
+      "what's not here",
+      "whats not here",
     ],
   },
 };
@@ -191,4 +212,51 @@ export function matchIntentToAgent(userMessage: string): AgentConfig | null {
   }
 
   return bestScore > 0 ? bestMatch : null;
+}
+
+// ─── Gap-analysis intent ──────────────────────────────────────
+
+/**
+ * Phrases that signal a "capability gap" question — the user is asking what
+ * their codebase is MISSING, not what it contains. Kept deliberately tight
+ * to avoid capturing ordinary architecture questions (which route to Atlas).
+ *
+ * Shared by:
+ *   - orchestrate/route.ts — decides whether to inject multi-module context
+ *     for cross-module gap synthesis instead of single-module context.
+ *   - workspace-session.tsx — decides whether to show gap follow-up chips.
+ *
+ * This is a separate signal from matchIntentToAgent() on purpose: a gap query
+ * should fire multi-module synthesis even when intent matching lands on Forge
+ * (a phrase match) OR returns null (an unusual phrasing). Decision #11.
+ */
+const GAP_INTENT_PHRASES: readonly string[] = [
+  "what am i missing",
+  "what's missing",
+  "whats missing",
+  "what am i lacking",
+  "what patterns am i lacking",
+  "what patterns am i missing",
+  "what should i add",
+  "what don't i have",
+  "what dont i have",
+  "capability gap",   // matches "capability gap" and "capability gaps"
+  "gap analysis",
+  "missing capabilities",
+  "missing patterns",
+  "what's not here",
+  "whats not here",
+  "am i missing",
+  "are we missing",
+  "what are we missing",
+];
+
+/**
+ * True when the message reads as a capability-gap question.
+ * Pure, allocation-light substring scan — safe to call on every message
+ * and safe to import into client components (no server-only dependencies).
+ */
+export function detectGapIntent(userMessage: string): boolean {
+  const lower = userMessage.toLowerCase();
+  return GAP_INTENT_PHRASES.some((phrase) => lower.includes(phrase));
 }

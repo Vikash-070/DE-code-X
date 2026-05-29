@@ -479,11 +479,18 @@ function WorkspaceInput({
   onSubmit,
   disabled,
   initialValue = "",
+  suggestions = [],
 }: {
   onSubmit:      (text: string) => void;
   disabled:      boolean;
   /** Pre-fills the input — used when navigating from Architecture Workspace via "Ask V#". */
   initialValue?: string;
+  /**
+   * Clickable suggestion chips rendered above the input. Used for gap-analysis
+   * discoverability (starter chips) and gap-response follow-ups. Clicking a chip
+   * submits it immediately. Empty array → no chip row rendered.
+   */
+  suggestions?: string[];
 }) {
   const [value, setValue] = useState(initialValue);
 
@@ -514,6 +521,21 @@ function WorkspaceInput({
 
   return (
     <div className="shrink-0 px-8 pb-6 pt-4">
+      {/* Suggestion chips — gap-analysis discoverability + follow-ups */}
+      {suggestions.length > 0 && !disabled && (
+        <div className="mb-2.5 flex flex-wrap gap-2">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => onSubmit(s)}
+              className="rounded-full border border-white/[0.07] bg-white/[0.02] px-3 py-1.5 text-[11px] text-zinc-400 transition-colors duration-150 hover:border-white/[0.16] hover:text-zinc-200"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
       <div
         className={cn(
           "flex items-end gap-3 rounded-2xl border bg-white/[0.02] px-5 py-3.5 transition-colors duration-200",
@@ -604,6 +626,7 @@ export function VHashSurface({
   activeRepository,
   onDirective,
   prefillMessage,
+  suggestions = [],
 }: {
   messages:          SessionMessage[];
   isOrchestrating:   boolean;
@@ -613,6 +636,8 @@ export function VHashSurface({
   onDirective:       (text: string) => void;
   /** Pre-fills the chat input. Set when navigating from Architecture Workspace via "Ask V#". */
   prefillMessage?:   string;
+  /** Gap-analysis suggestion chips shown above the input. */
+  suggestions?:      string[];
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const { health, model } = useProviderStatus();
@@ -712,7 +737,7 @@ export function VHashSurface({
         </div>
       </div>
 
-      <WorkspaceInput onSubmit={onDirective} disabled={isOrchestrating} initialValue={prefillMessage} />
+      <WorkspaceInput onSubmit={onDirective} disabled={isOrchestrating} initialValue={prefillMessage} suggestions={suggestions} />
     </div>
   );
 }
