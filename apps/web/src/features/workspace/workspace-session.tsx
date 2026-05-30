@@ -4,13 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useActiveRepository }             from "@/contexts/repository-context";
 import { detectGapIntent }                 from "@/server/repo/agent-registry";
+import { detectOrchestrationAction }        from "@/server/repo/agent-orchestration";
 import type { GitHubRepositorySummary }    from "@/services/github/types";
 import { extractReferenceUrl }             from "@/services/reference/url-parser";
 import type { AgentResult, CipherFinding } from "@/types/intelligence";
 
-import type { CipherAgentState }            from "./agent-activity-panel";
-import { CIPHER_IDLE }                      from "./agent-activity-panel";
-import { VHashSurface }                     from "./vhash-surface";
+import type { CipherAgentState, AgentActivity } from "./agent-activity-panel";
+import { CIPHER_IDLE, NO_ACTIVITY }             from "./agent-activity-panel";
+import { VHashSurface }                         from "./vhash-surface";
 
 // ─── Message types ────────────────────────────────────────
 
@@ -144,15 +145,53 @@ function detectFilePath(text: string): string | null {
   return match?.[1]?.replace(/\\/g, "/") ?? null;
 }
 
+/**
+ * Derive the live Agent Team activity from the user's directive.
+ *
+ * Uses the SAME pure detectors the server dispatches on (detectOrchestrationAction,
+ * detectGapIntent), so the panel reflects exactly which module V# is about to run
+ * and what process it's doing — with no change to the streaming transport.
+ */
+function deriveActivity(message: string): AgentActivity {
+  const action = detectOrchestrationAction(message);
+  if (action) {
+    switch (action.kind) {
+      case "discover":
+        return { agent: null, label: "Listing agents" };
+      case "run-atlas": {
+        const verb =
+          action.lens === "topology"   ? "Mapping topology" :
+          action.lens === "capability" ? "Inferring capabilities" :
+          action.lens === "graph"      ? "Mapping relationships" :
+                                         "Analyzing architecture";
+        return { agent: "atlas", label: action.refresh ? `${verb} · fresh` : verb };
+      }
+      case "confirm-paid":
+        return { agent: null, label: "Preparing confirmation" };
+      case "run-paid": {
+        const base = action.filePath.split("/").pop() ?? action.filePath;
+        return { agent: action.agentId, label: `Analyzing ${base}`, file: action.filePath };
+      }
+    }
+  }
+  if (detectGapIntent(message)) {
+    return { agent: null, label: "Synthesizing gaps · Atlas · Sentinel · Pulse" };
+  }
+  return { agent: null, label: "Working" };
+}
+
 // ─── Component ───────────────────────────────────────────
 
 export function WorkspaceSession({
   onOrchestrationChange,
   onCipherStateChange,
+  onActivityChange,
   prefillMessage,
 }: {
   onOrchestrationChange?: (orchestrating: boolean) => void;
   onCipherStateChange?:   (state: CipherAgentState) => void;
+  /** Notifies the Agent Team panel which module V# is running and its process. */
+  onActivityChange?:      (activity: AgentActivity) => void;
   /** Pre-fills the chat input. Passed from Architecture Workspace "Ask V#" button. */
   prefillMessage?: string;
 } = {}) {
@@ -176,8 +215,10 @@ export function WorkspaceSession({
   // Stable refs for callbacks so they never go stale in closures
   const onOrchestrationChangeRef = useRef(onOrchestrationChange);
   const onCipherStateChangeRef   = useRef(onCipherStateChange);
+  const onActivityChangeRef      = useRef(onActivityChange);
   useEffect(() => { onOrchestrationChangeRef.current = onOrchestrationChange; }, [onOrchestrationChange]);
   useEffect(() => { onCipherStateChangeRef.current   = onCipherStateChange;   }, [onCipherStateChange]);
+  useEffect(() => { onActivityChangeRef.current      = onActivityChange;      }, [onActivityChange]);
 
   // Keep cipherStateRef in sync
   useEffect(() => { cipherStateRef.current = cipherState; }, [cipherState]);
@@ -358,6 +399,8 @@ export function WorkspaceSession({
       setMessages((prev) => [...prev, userMsg]);
       setIsOrchestrating(true);
       setIsReferenceMode(!!referenceUrl);
+      // Tell the Agent Team panel which module is running and what it's doing.
+      onActivityChangeRef.current?.(deriveActivity(text.trim()));
 
       // ── V# streaming placeholder ──────────────────────────
       const assistantId = uid();
@@ -498,6 +541,7 @@ export function WorkspaceSession({
         if (mountedRef.current) {
           setIsOrchestrating(false);
           setIsReferenceMode(false);
+          onActivityChangeRef.current?.(NO_ACTIVITY);
         }
       }
     },

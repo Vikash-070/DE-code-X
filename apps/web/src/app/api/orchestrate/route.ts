@@ -72,6 +72,17 @@ import {
   formatModuleContextForPrompt,
   GAP_SYNTHESIS_MODULES,
 } from "@/server/repo/module-context";
+import {
+  detectOrchestrationAction,
+  formatAgentRoster,
+  formatPaidConfirmation,
+  formatAtlasResult,
+  formatPaidResult,
+} from "@/server/repo/agent-orchestration";
+import { analyzeRepoWithAtlas }     from "@/server/repo/atlas-analyzer";
+import { analyzeFileWithCipher }    from "@/server/repo/cipher-analyzer";
+import { analyzeFileWithSentinel }  from "@/server/repo/sentinel-analyzer";
+import { analyzeFileWithPulse }     from "@/server/repo/pulse-analyzer";
 import { fetchRepoTree, searchTree, type RepoTree }    from "@/services/github/tree";
 import { buildSemanticRetrievalContext }                from "@/services/github/semantic-retrieval";
 import { fetchFileContent }                          from "@/services/github/file";
@@ -1192,6 +1203,132 @@ export async function POST(request: Request) {
       let firstTokenTimeoutId:  ReturnType<typeof setTimeout> | null = null;
 
       try {
+        // ── 5.0 Agent orchestration interception ──────────────
+        // V# is the only interface. Detect explicit module-control intents
+        // ("what agents", "run atlas", "use cipher", "confirm cipher <path>")
+        // and dispatch the module directly — streaming results — instead of
+        // falling through to the retrieval-only AI pipeline. Atlas is free +
+        // deterministic → auto-runs; paid modules (Cipher/Sentinel/Pulse) are
+        // gated by confirm-before-spend. Runs regardless of conversational
+        // classification: these are explicit, deterministic commands.
+        const orchestration = detectOrchestrationAction(message.trim());
+        if (orchestration && repositoryContext.fullName) {
+          try {
+            if (orchestration.kind === "discover") {
+              console.log(`[orchestrate] orchestration=discover`);
+              write(formatAgentRoster());
+              return;
+            }
+
+            if (orchestration.kind === "confirm-paid") {
+              console.log(`[orchestrate] orchestration=confirm-paid agent=${orchestration.agentId} hasPath=${!!orchestration.filePath}`);
+              write(formatPaidConfirmation(orchestration.agentId, orchestration.filePath));
+              return;
+            }
+
+            // run-atlas / run-paid both execute a module → need a GitHub token.
+            const [oOwner, oRepo] = repositoryContext.fullName.split("/");
+            const oBranch = repositoryContext.defaultBranch ?? "main";
+            const orchToken = await clerkClient()
+              .then(c => c.users.getUserOauthAccessToken(clerkId, "github"))
+              .then(t => t.data[0]?.token)
+              .catch(() => undefined);
+
+            if (!orchToken) {
+              write("I need GitHub access to analyze this repository. Connect GitHub in Settings, then ask again.");
+              return;
+            }
+
+            if (orchestration.kind === "run-atlas") {
+              console.log(`[orchestrate] orchestration=run-atlas lens=${orchestration.lens} refresh=${orchestration.refresh} repo=${repositoryContext.fullName}`);
+              const lensVerb =
+                orchestration.lens === "topology"   ? "mapping repository topology" :
+                orchestration.lens === "capability" ? "inferring repository capabilities" :
+                orchestration.lens === "graph"      ? "mapping system relationships" :
+                                                       "analyzing repository architecture";
+              write(orchestration.refresh
+                ? `Re-running Atlas (${lensVerb})…\n\n`
+                : `Running Atlas (${lensVerb})…\n\n`);
+              const atlas = await analyzeRepoWithAtlas({
+                owner:       oOwner,
+                repo:        oRepo,
+                branch:      oBranch,
+                githubToken: orchToken,
+                force:       orchestration.refresh,
+              });
+              write(formatAtlasResult({
+                lens:             orchestration.lens,
+                refresh:          orchestration.refresh,
+                architectureTree: atlas.architectureTree,
+                findings:         atlas.findings,
+                capabilities:     atlas.capabilities,
+                totalPaths:       atlas.totalPaths,
+                truncated:        atlas.truncated,
+                fromCache:        atlas.wasDeduped,
+                graph:            atlas.architectureGraph,
+              }));
+              return;
+            }
+
+            // run-paid — confirmed by the user, bounded to one file.
+            // Requires a decrypted OpenRouter key (await the in-flight lookup).
+            const keyRecord = await keyPromise;
+            if (!keyRecord) {
+              write("No OpenRouter key is configured. Add your key in Settings → AI Providers, then confirm again.");
+              return;
+            }
+            let paidApiKey: string;
+            try {
+              paidApiKey = decryptKey(keyRecord.encryptedKey);
+            } catch {
+              write("Your OpenRouter key couldn't be decrypted. Re-save it in Settings → AI Providers.");
+              return;
+            }
+            if (!paidApiKey.startsWith(OPENROUTER_KEY_PREFIX)) {
+              write("Your OpenRouter key format looks invalid (expected sk-or-…). Check Settings → AI Providers.");
+              return;
+            }
+
+            const displayName = orchestration.agentId.charAt(0).toUpperCase() + orchestration.agentId.slice(1);
+            console.log(`[orchestrate] orchestration=run-paid agent=${orchestration.agentId} file=${orchestration.filePath}`);
+            write(`Running ${displayName} on \`${orchestration.filePath}\`…\n\n`);
+
+            const dispatch = {
+              owner:       oOwner,
+              repo:        oRepo,
+              filePath:    orchestration.filePath,
+              branch:      oBranch,
+              githubToken: orchToken,
+              aiConfig: {
+                provider: "openrouter" as const,
+                apiKey:   paidApiKey,
+                model:    keyRecord.model ?? undefined,
+              },
+            };
+
+            let paidResult;
+            try {
+              paidResult =
+                orchestration.agentId === "cipher"   ? await analyzeFileWithCipher(dispatch)   :
+                orchestration.agentId === "sentinel" ? await analyzeFileWithSentinel(dispatch) :
+                                                       await analyzeFileWithPulse(dispatch);
+            } catch (err) {
+              const m = err instanceof Error ? err.message : "unknown error";
+              console.log(`[orchestrate] orchestration_paid_error agent=${orchestration.agentId} err=${m}`);
+              write(`I couldn't analyze \`${orchestration.filePath}\` with ${displayName}: ${m}`);
+              return;
+            }
+
+            write(formatPaidResult(displayName, orchestration.filePath, paidResult.findings, paidResult.wasDeduped));
+            return;
+          } catch (err) {
+            const m = err instanceof Error ? err.message : "unknown error";
+            console.log(`[orchestrate] orchestration_error err=${m}`);
+            write(`\n\nSomething went wrong dispatching that module: ${m}`);
+            return;
+          }
+        }
+
         // ── 5a. Await DB + code context + reference content ───
         let dbTimedOut = false;
         const dbTimeoutPromise = new Promise<null>((r) =>

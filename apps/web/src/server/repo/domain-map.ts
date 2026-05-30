@@ -40,9 +40,38 @@ export interface ArchitecturalDomain {
   pressure:  "heavy" | "medium" | "light";
 }
 
+/**
+ * High-signal file kinds that define how the system behaves at runtime.
+ * Detected by filename in the same O(n) pass as domain classification —
+ * this is the "Critical File Registry" (pipeline stage 3) without a second scan.
+ */
+export type CriticalFileKind =
+  | "middleware"     // middleware.ts — request interception / auth gating
+  | "route-handler"  // route.ts — Next.js App Router endpoint
+  | "auth"           // auth.ts / auth.config.ts — authentication wiring
+  | "realtime"       // socket.ts / ws.ts — websocket / realtime entry
+  | "server-entry"   // server.ts — custom server bootstrap
+  | "config";        // *.config.ts — build / framework configuration
+
+export interface CriticalFile {
+  /** Full repo-relative path, e.g. "src/middleware.ts". */
+  path:   string;
+  /** Why this file is structurally important. */
+  kind:   CriticalFileKind;
+  /** Domain this file belongs to, or null if outside any known domain (e.g. root config). */
+  domain: string | null;
+  /** GitHub blob SHA — enables per-file freshness without re-reading content. */
+  sha:    string;
+}
+
 export interface ArchitecturalDomainMap {
   /** Detected domains, sorted by fileCount descending (heaviest first). */
   domains:      ArchitecturalDomain[];
+  /**
+   * Critical files detected by filename in the same scan pass.
+   * Empty array when none found. Bounded by repo's critical-file count (tiny).
+   */
+  criticalFiles: CriticalFile[];
   /** GitHub full name, e.g. "acme/my-app". */
   repoFullName: string;
   /** Unix ms timestamp of when this map was built. */
@@ -139,6 +168,34 @@ function pressureLabel(count: number): "heavy" | "medium" | "light" {
   return "light";
 }
 
+// ─── Critical file detection ──────────────────────────────
+// Precise, basename-anchored rules — one O(1) test per blob in the main scan.
+// Deliberately high-signal: we want the files that define system behaviour,
+// not every file that happens to contain a keyword. Order matters only for
+// reporting; each basename matches at most one kind (first hit wins).
+
+const CRITICAL_RULES: ReadonlyArray<{ kind: CriticalFileKind; test: RegExp }> = [
+  { kind: "middleware",    test: /^middleware\.[mc]?[jt]s$/ },
+  { kind: "route-handler", test: /^route\.[mc]?[jt]s$/ },
+  { kind: "auth",          test: /^auth(\.config)?\.[mc]?[jt]sx?$/ },
+  { kind: "realtime",      test: /^(socket|ws)(\.[a-z]+)?\.[mc]?[jt]s$/ },
+  { kind: "server-entry",  test: /^server\.[mc]?[jt]s$/ },
+  { kind: "config",        test: /\.config\.[mc]?[jt]s$/ },
+];
+
+/**
+ * Classify a path as a critical file by its basename, or null if ordinary.
+ * Pure, allocation-light: lowercases the basename and runs ≤6 regex tests.
+ */
+function classifyCriticalFile(path: string): CriticalFileKind | null {
+  const slash = path.lastIndexOf("/");
+  const base  = (slash === -1 ? path : path.slice(slash + 1)).toLowerCase();
+  for (const { kind, test } of CRITICAL_RULES) {
+    if (test.test(base)) return kind;
+  }
+  return null;
+}
+
 // ─── Public API ───────────────────────────────────────────
 
 /**
@@ -154,13 +211,17 @@ function pressureLabel(count: number): "heavy" | "medium" | "light" {
 export function buildDomainMap(tree: RepoTree): ArchitecturalDomainMap {
   // Map: prefix → { name, prefix, count }
   const counts = new Map<string, { name: string; prefix: string; count: number }>();
+  // Critical files detected in the same pass — see classifyCriticalFile().
+  const criticalFiles: CriticalFile[] = [];
 
   for (const node of tree.nodes) {
     const pathLower = node.path.toLowerCase();
+    let matchedDomain: string | null = null;
 
     for (const [prefix, domainName] of SORTED_PREFIXES) {
       // Match: path starts with "prefix/" or path IS exactly "prefix"
       if (pathLower.startsWith(prefix + "/") || pathLower === prefix) {
+        matchedDomain = domainName;
         const existing = counts.get(prefix);
         if (existing) {
           existing.count++;
@@ -170,8 +231,23 @@ export function buildDomainMap(tree: RepoTree): ArchitecturalDomainMap {
         break; // longest-match wins — do not fall through to shorter prefix
       }
     }
-    // Files not matching any prefix are silently ignored.
-    // Root-level config files (tsconfig.json etc.) carry no architectural signal.
+    // Files not matching any prefix are silently ignored for domain counts.
+    // Root-level config files (tsconfig.json etc.) carry no domain signal —
+    // but some ARE critical files, so the registry below still considers them.
+
+    // Critical File Registry: blobs only, single O(1) basename test.
+    // Runs even when matchedDomain is null (e.g. root next.config.ts).
+    if (node.type === "blob") {
+      const kind = classifyCriticalFile(node.path);
+      if (kind) {
+        criticalFiles.push({
+          path:   node.path,
+          kind,
+          domain: matchedDomain,
+          sha:    node.sha,
+        });
+      }
+    }
   }
 
   const domains: ArchitecturalDomain[] = [];
@@ -194,14 +270,56 @@ export function buildDomainMap(tree: RepoTree): ArchitecturalDomainMap {
     ` repo=${tree.owner}/${tree.repo}` +
     ` domains=${domains.length}` +
     ` heavy=${heavy}` +
+    ` critical=${criticalFiles.length}` +
     ` top=${domains[0]?.name ?? "none"} (${domains[0]?.fileCount ?? 0} files)`
   );
 
   return {
     domains,
+    criticalFiles,
     repoFullName: `${tree.owner}/${tree.repo}`,
     detectedAt:   Date.now(),
   };
+}
+
+// ─── Structural fingerprint (freshness signal) ────────────
+// Atlas findings are PURELY structural — they depend on domain counts,
+// pressure, and critical-file names, never on file CONTENT. So the freshness
+// signal must be content-insensitive: it changes only when the architecture
+// shape changes (file added/removed/moved between domains, or a critical file
+// appearing/disappearing). A content-only edit yields the SAME fingerprint →
+// cache hit → zero wasted re-analysis. This deliberately does NOT hash blob
+// SHAs, which would churn the cache on every commit for no semantic reason.
+
+/** Deterministic, non-cryptographic 32-bit hash (FNV-1a) → 8-char hex. */
+function fnv1aHex(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Derive a stable, content-insensitive fingerprint of the repository's
+ * architectural shape. Two trees with identical structure but different file
+ * contents (different blob SHAs) produce the SAME fingerprint.
+ *
+ * Used by Atlas as its `blobSHA` freshness key: re-analysis is triggered only
+ * when this value changes, i.e. only when the architecture actually changed.
+ */
+export function deriveStructuralFingerprint(map: ArchitecturalDomainMap): string {
+  const domainSig = map.domains
+    .map(d => `${d.name}:${d.fileCount}:${d.pressure}`)
+    .sort()
+    .join("|");
+  const criticalSig = map.criticalFiles
+    .map(c => `${c.kind}:${c.path}`)
+    .sort()
+    .join("|");
+  const hash = fnv1aHex(`${domainSig}#${criticalSig}`);
+  return `arch-${map.domains.length}d-${map.criticalFiles.length}c-${hash}`;
 }
 
 /**

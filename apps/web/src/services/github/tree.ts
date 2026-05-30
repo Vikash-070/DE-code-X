@@ -22,7 +22,22 @@ export interface GitHubTreeNode {
 }
 
 export interface RepoTree {
+  /**
+   * Filtered source blobs — vendor/build dirs, binaries, lockfiles, and
+   * oversized files removed. This is the candidate set for V# retrieval and
+   * the (unchanged) input to V#'s domain-map context.
+   */
   nodes:     GitHubTreeNode[];
+  /**
+   * 100% of repository paths, including directory (`tree`) entries and files
+   * that `shouldInclude` filters out. This is ATLAS's source of truth — it lets
+   * Atlas know every path exists without ever reading file content. Optional so
+   * test-constructed trees and legacy callers keep working; consumers that need
+   * full visibility fall back to `nodes` when absent.
+   */
+  rawNodes?: GitHubTreeNode[];
+  /** True when GitHub truncated the recursive tree (very large monorepo). */
+  truncated?: boolean;
   owner:     string;
   repo:      string;
   branch:    string;
@@ -229,8 +244,10 @@ export async function fetchRepoTree(
     console.log(`[tree] response_truncated owner=${owner} repo=${repo} — large monorepo, some paths may be missing`);
   }
 
-  // Map and filter to source files only
-  const nodes: GitHubTreeNode[] = treeResp.tree
+  // Map ALL valid entries once — this is Atlas's raw source of truth (100% of
+  // paths, including directories). Then derive the filtered V# view from it.
+  // One GitHub call feeds both consumers; no second round-trip.
+  const rawNodes: GitHubTreeNode[] = treeResp.tree
     .filter((entry): entry is Required<typeof entry> =>
       typeof entry.path === "string" &&
       typeof entry.type === "string" &&
@@ -241,13 +258,19 @@ export async function fetchRepoTree(
       type: entry.type as "blob" | "tree",
       sha:  entry.sha,
       size: entry.size
-    }))
-    .filter(shouldInclude);
+    }));
 
-  console.log(`[tree] fetch_complete nodes=${nodes.length} truncated=${treeResp.truncated}`);
+  // Filtered source-blob view for V# retrieval (unchanged behavior).
+  const nodes: GitHubTreeNode[] = rawNodes.filter(shouldInclude);
+
+  console.log(
+    `[tree] fetch_complete nodes=${nodes.length} rawNodes=${rawNodes.length} truncated=${treeResp.truncated}`
+  );
 
   const result: RepoTree = {
     nodes,
+    rawNodes,
+    truncated: treeResp.truncated,
     owner,
     repo,
     branch,
@@ -401,6 +424,22 @@ export function searchTreeByKeyword(
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(s => s.path);
+}
+
+/**
+ * Build an O(1) path-existence index over the FULL repository tree.
+ *
+ * Uses rawNodes (100% of paths) when available, falling back to the filtered
+ * `nodes` for legacy/test trees. Lets Atlas answer "does this path exist?"
+ * without scanning the node array and without reading any file content.
+ *
+ * @returns A Set of every known path (files and directories).
+ */
+export function buildPathIndex(tree: RepoTree): Set<string> {
+  const source = tree.rawNodes ?? tree.nodes;
+  const index = new Set<string>();
+  for (const node of source) index.add(node.path);
+  return index;
 }
 
 /**

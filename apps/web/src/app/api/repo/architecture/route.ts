@@ -38,6 +38,9 @@ import { enrichSystemMapWithTree }    from "@/server/repo/system-registry";
 import { buildDomainMap }             from "@/server/repo/domain-map";
 import { serializeArchitectureTree }  from "@/server/repo/architecture-serializer";
 import { checkStaleness, buildNodeFreshnessMap } from "@/server/repo/staleness-checker";
+import { buildArchitectureGraph }     from "@/server/repo/architecture-wire";
+import { buildFileMap }               from "@/server/repo/file-map";
+import { loadRepoDependencies }       from "@/server/repo/dependency-loader";
 import type { ArchitectureResponse, ArchitectureTreeNode }  from "@/types/architecture";
 
 export const dynamic = "force-dynamic";
@@ -147,6 +150,23 @@ export async function GET(request: Request): Promise<Response> {
     }
   }
 
+  // ── 6b. Architecture graph (Atlas Relationship Engine, Increment A+B) ──
+  // Deterministic system nodes + external-dependency edges. Built from the same
+  // tree; the dependency read is bounded (≤3 package.json) and fail-open.
+  let architectureGraph: ArchitectureResponse["architectureGraph"];
+  let fileMap: ArchitectureResponse["fileMap"];
+  if (tree) {
+    const fullNodes    = tree.rawNodes ?? tree.nodes;
+    const dependencies = await loadRepoDependencies(owner, repo, branch, githubToken, fullNodes)
+      .catch(() => [] as string[]);
+    architectureGraph  = buildArchitectureGraph({
+      nodes:        fullNodes,
+      dependencies,
+      truncated:    tree.truncated ?? false,
+    });
+    fileMap = buildFileMap(fullNodes);
+  }
+
   // ── 7. Serialize ───────────────────────────────────────────
   const treeNodes = serializeArchitectureTree(domainMap, enrichedSystemMap);
 
@@ -167,6 +187,8 @@ export async function GET(request: Request): Promise<Response> {
     systemSource,
     repoFullName,
     generatedAt:  new Date().toISOString(),
+    architectureGraph,
+    fileMap,
   };
 
   console.log(

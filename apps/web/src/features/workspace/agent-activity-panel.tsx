@@ -28,6 +28,25 @@ export const CIPHER_IDLE: CipherAgentState = {
   error:         null,
 };
 
+// ─── Orchestration activity ───────────────────────────────
+// Describes which module V# is currently running and what process it's doing.
+// Derived client-side from the user's directive (same detector the server
+// dispatches on), so the Agent Team panel reflects the live process without
+// any change to the streaming transport.
+
+export type ActivityAgent = "atlas" | "cipher" | "sentinel" | "pulse" | "forge";
+
+export interface AgentActivity {
+  /** Module currently running, or null when V# is reasoning by itself. */
+  agent: ActivityAgent | null;
+  /** Short human label of the process, e.g. "Mapping topology". */
+  label: string;
+  /** Target file for file-scoped paid modules (Cipher/Sentinel/Pulse). */
+  file?: string | null;
+}
+
+export const NO_ACTIVITY: AgentActivity = { agent: null, label: "" };
+
 // ─── Module card config ───────────────────────────────────
 
 interface ModuleCardConfig {
@@ -88,7 +107,8 @@ function fileName(filePath: string | null): string {
 
 // ─── V# card ──────────────────────────────────────────────
 
-function VHashCard({ isOrchestrating }: { isOrchestrating: boolean }) {
+function VHashCard({ isOrchestrating, label }: { isOrchestrating: boolean; label?: string }) {
+  const workingLabel = label && label.length > 0 ? label : "Working";
   return (
     <div
       className={cn(
@@ -136,9 +156,9 @@ function VHashCard({ isOrchestrating }: { isOrchestrating: boolean }) {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -2 }}
                 transition={{ duration: 0.15 }}
-                className="mt-0.5 flex items-center gap-1 text-[10px] text-emerald-400/80"
+                className="mt-0.5 flex items-center gap-1 truncate text-[10px] text-emerald-400/80"
               >
-                <span>Working</span>
+                <span className="truncate">{workingLabel}</span>
                 <motion.span
                   animate={{ opacity: [1, 0.3, 1] }}
                   transition={{ repeat: Infinity, duration: 1.2 }}
@@ -315,16 +335,19 @@ interface PassiveModuleState {
 function PassiveModuleCard({
   moduleId,
   state = { status: "idle", findingsCount: 0 },
+  runningLabel,
 }: {
   moduleId: keyof typeof MODULE_CARDS;
   state?:   PassiveModuleState;
+  /** Live process label shown while running (e.g. "Mapping topology"). */
+  runningLabel?: string;
 }) {
   const cfg       = MODULE_CARDS[moduleId]!;
   const isRunning = state.status === "running";
   const isReady   = state.status === "ready";
 
   function statusText(): string {
-    if (isRunning) return "Analyzing…";
+    if (isRunning) return runningLabel && runningLabel.length > 0 ? runningLabel : "Analyzing";
     if (isReady)   return `${state.findingsCount} finding${state.findingsCount !== 1 ? "s" : ""} stored`;
     return cfg.idleText;
   }
@@ -434,11 +457,31 @@ export function AgentTeamPanel({
   activeRepository,
   isOrchestrating,
   cipherState,
+  activity = NO_ACTIVITY,
 }: {
   activeRepository: GitHubRepositorySummary | null;
   isOrchestrating:  boolean;
   cipherState:      CipherAgentState;
+  /** What V# is currently running — lights up the matching module card. */
+  activity?:        AgentActivity;
 }) {
+  // A passive module (Sentinel / Pulse / Atlas / Forge) is "running" when the
+  // live activity names it. Its own stored-findings state is layered in later.
+  const passiveState = (id: ActivityAgent): PassiveModuleState =>
+    activity.agent === id
+      ? { status: "running", findingsCount: 0 }
+      : { status: "idle", findingsCount: 0 };
+  const runningLabel = (id: ActivityAgent): string | undefined =>
+    activity.agent === id ? activity.label : undefined;
+
+  // Cipher has its own live state from the auto-analysis flow; when V# runs
+  // Cipher via orchestration, surface that on the same card without clobbering
+  // an in-flight auto-analysis.
+  const effectiveCipher: CipherAgentState =
+    activity.agent === "cipher" && cipherState.status === "idle"
+      ? { status: "analyzing", file: activity.file ?? null, findingsCount: 0, error: null }
+      : cipherState;
+
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-[28px] border border-white/[0.06] bg-black/50 backdrop-blur-xl">
 
@@ -456,18 +499,18 @@ export function AgentTeamPanel({
       >
         {/* ── Orchestration ──────────────────────────── */}
         <SectionDivider label="Orchestration" />
-        <VHashCard isOrchestrating={isOrchestrating} />
+        <VHashCard isOrchestrating={isOrchestrating} label={activity.label} />
 
         {/* ── Intelligence Modules ───────────────────── */}
         <SectionDivider label="Intelligence" />
-        <CipherCard state={cipherState} />
-        <PassiveModuleCard moduleId="sentinel" />
-        <PassiveModuleCard moduleId="pulse" />
+        <CipherCard state={effectiveCipher} />
+        <PassiveModuleCard moduleId="sentinel" state={passiveState("sentinel")} runningLabel={runningLabel("sentinel")} />
+        <PassiveModuleCard moduleId="pulse"    state={passiveState("pulse")}    runningLabel={runningLabel("pulse")} />
 
         {/* ── Repository Modules ────────────────────── */}
         <SectionDivider label="Repository" />
-        <PassiveModuleCard moduleId="atlas" />
-        <PassiveModuleCard moduleId="forge" />
+        <PassiveModuleCard moduleId="atlas" state={passiveState("atlas")} runningLabel={runningLabel("atlas")} />
+        <PassiveModuleCard moduleId="forge" state={passiveState("forge")} runningLabel={runningLabel("forge")} />
       </div>
 
       {/* Footer */}

@@ -16,8 +16,8 @@ import { useActiveRepository } from "@/contexts/repository-context";
 import { AtlasInitialization } from "@/features/workspace/atlas-initialization";
 import { RepositoryOnboarding } from "@/features/workspace/repository-onboarding";
 import { WorkspaceSession } from "@/features/workspace/workspace-session";
-import { AgentTeamPanel, CIPHER_IDLE } from "@/features/workspace/agent-activity-panel";
-import type { CipherAgentState } from "@/features/workspace/agent-activity-panel";
+import { AgentTeamPanel, CIPHER_IDLE, NO_ACTIVITY } from "@/features/workspace/agent-activity-panel";
+import type { CipherAgentState, AgentActivity } from "@/features/workspace/agent-activity-panel";
 import { useGitHubIntelligence } from "@/hooks/use-github-intelligence";
 import type { GitHubRepositorySummary } from "@/services/github/types";
 
@@ -155,6 +155,7 @@ export function WorkspaceHomePage() {
   const [phase, setPhase]               = useState<"idle" | "initializing">("idle");
   const [isOrchestrating, setOrch]      = useState(false);
   const [cipherState, setCipherState]   = useState<CipherAgentState>(CIPHER_IDLE);
+  const [activity, setActivity]         = useState<AgentActivity>(NO_ACTIVITY);
 
   // Read prefill from URL (?prefill=...) — set by Architecture Workspace "Ask V#" button.
   const searchParams   = useSearchParams();
@@ -199,6 +200,7 @@ export function WorkspaceHomePage() {
           <WorkspaceSession
             onOrchestrationChange={setOrch}
             onCipherStateChange={setCipherState}
+            onActivityChange={setActivity}
             prefillMessage={prefillMessage}
           />
         </div>
@@ -209,6 +211,7 @@ export function WorkspaceHomePage() {
             activeRepository={activeRepository}
             isOrchestrating={isOrchestrating}
             cipherState={cipherState}
+            activity={activity}
           />
         </div>
       </div>

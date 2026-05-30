@@ -128,6 +128,9 @@ export interface ArchitectureTreeNode {
 
 // ── API response type ────────────────────────────────────────
 
+import type { ArchitectureGraph } from "@/server/repo/architecture-wire";
+import type { FileMap } from "@/server/repo/file-map";
+
 /**
  * Response shape from GET /api/repo/architecture.
  */
@@ -146,4 +149,18 @@ export interface ArchitectureResponse {
 
   /** ISO 8601 timestamp of when data was generated. */
   generatedAt: string;
+
+  /**
+   * Deterministic architecture graph (Atlas Relationship Engine, Increment A+B):
+   * tiered system nodes + external-dependency edges. Drives the visual canvas.
+   * Absent when the repository tree could not be fetched.
+   */
+  architectureGraph?: ArchitectureGraph;
+
+  /**
+   * File-level map (Stage 1): every repository file classified into an
+   * architectural layer + role. Drives the canvas "Files" view. Absent when
+   * the repository tree could not be fetched.
+   */
+  fileMap?: FileMap;
 }

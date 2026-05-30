@@ -22,6 +22,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { useActiveRepository } from "@/contexts/repository-context";
 import type { ArchitectureResponse, ArchitectureTreeNode } from "@/types/architecture";
+import type { ArchitectureGraph } from "@/server/repo/architecture-wire";
+import type { FileMap } from "@/server/repo/file-map";
 
 // ─── State types ─────────────────────────────────────────────
 
@@ -33,6 +35,10 @@ export interface ArchitectureTreeState {
   repoFullName: string | null;
   generatedAt: string | null;
   systemSource: ArchitectureResponse["systemSource"] | null;
+  /** Relationship graph (Increment A+B) — null until loaded / when unavailable. */
+  architectureGraph: ArchitectureGraph | null;
+  /** File-level map (Stage 1) — null until loaded / when unavailable. */
+  fileMap: FileMap | null;
   /** Present when status === "error". */
   error:       string | null;
 }
@@ -43,6 +49,8 @@ const INITIAL_STATE: ArchitectureTreeState = {
   repoFullName: null,
   generatedAt:  null,
   systemSource: null,
+  architectureGraph: null,
+  fileMap:      null,
   error:        null,
 };
 
@@ -111,6 +119,8 @@ export function useArchitectureTree(): ArchitectureTreeState {
           repoFullName: data.repoFullName,
           generatedAt:  data.generatedAt,
           systemSource: data.systemSource,
+          architectureGraph: data.architectureGraph ?? null,
+          fileMap:      data.fileMap ?? null,
           error:        null,
         });
       } catch (err) {

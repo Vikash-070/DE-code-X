@@ -21,13 +21,15 @@
  *   - All of this is v1. v2 adds bounded import analysis; v3 adds integrity scoring.
  */
 
-import { Github, RefreshCw, TreePine } from "lucide-react";
+import { Github, Network, RefreshCw, TreePine } from "lucide-react";
 import { useRouter }            from "next/navigation";
 
 import { PageHeading }          from "@/components/dashboard/page-heading";
 import { useActiveRepository }  from "@/contexts/repository-context";
 import { useArchitectureTree }  from "@/hooks/use-architecture-tree";
 import { useDomainIntelligence } from "@/hooks/use-domain-intelligence";
+import { ArchitectureCanvas }   from "./components/architecture-canvas";
+import { NotableFindingsPanel } from "./components/notable-findings-panel";
 import { ArchitectureTree }     from "./components/architecture-tree";
 import { IntelligencePanel }    from "./components/intelligence-panel";
 
@@ -74,6 +76,25 @@ export function ArchitectureWorkspacePage() {
               Select a repository from the top bar to view its architecture map.
             </p>
           </div>
+        </div>
+      )}
+
+      {/* ── Architecture map (Atlas Relationship Engine) ──── */}
+      {activeRepository && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 px-1">
+            <Network className="h-4 w-4 text-zinc-600" />
+            <span className="text-xs font-medium text-zinc-500">System Architecture Map</span>
+            {architectureState.status === "loading" && (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin text-zinc-600" />
+            )}
+          </div>
+          <ArchitectureCanvas
+            graph={architectureState.architectureGraph}
+            fileMap={architectureState.fileMap}
+            loading={architectureState.status === "loading"}
+          />
+          <NotableFindingsPanel />
         </div>
       )}
 

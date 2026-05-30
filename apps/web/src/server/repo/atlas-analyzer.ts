@@ -25,8 +25,13 @@
  */
 
 import { fetchRepoTree }           from "@/services/github/tree";
-import type { GitHubTreeNode }     from "@/services/github/tree";
-import { buildDomainMap }          from "@/server/repo/domain-map";
+import { buildDomainMap, deriveStructuralFingerprint } from "@/server/repo/domain-map";
+import type { CriticalFile, CriticalFileKind } from "@/server/repo/domain-map";
+import { deriveCapabilities }       from "@/server/repo/capability-map";
+import type { Capability }          from "@/server/repo/capability-map";
+import { buildArchitectureGraph }   from "@/server/repo/architecture-wire";
+import type { ArchitectureGraph }   from "@/server/repo/architecture-wire";
+import { loadRepoDependencies }     from "@/server/repo/dependency-loader";
 import {
   getFreshIntelligence,
   upsertFileIntelligence,
@@ -47,9 +52,20 @@ const MIN_DOMAINS_FOR_ANALYSIS = 2;
  * Derive architecture findings from the domain map.
  * Pure function — no I/O, no AI call.
  */
+/** Human-readable labels for critical file kinds, used in finding text. */
+const CRITICAL_KIND_LABEL: Record<CriticalFileKind, string> = {
+  "middleware":     "middleware",
+  "route-handler":  "route handlers",
+  "auth":           "auth config",
+  "realtime":       "realtime/socket",
+  "server-entry":   "server entry",
+  "config":         "config",
+};
+
 function deriveArchitectureFindings(
   tree: ArchitectureTree,
-  repoFullName: string
+  repoFullName: string,
+  criticalFiles: CriticalFile[] = []
 ): CipherFinding[] {
   const findings: CipherFinding[] = [];
   const { domains } = tree;
@@ -131,34 +147,36 @@ function deriveArchitectureFindings(
     });
   }
 
+  // ── Finding 5: Critical File Registry ────────────────────
+  // High-signal files that define runtime behaviour (middleware, route
+  // handlers, auth, realtime, server entry, config). Detected by filename
+  // in the same scan — confirmed-confidence because the files literally exist.
+  if (criticalFiles.length > 0) {
+    const countByKind = new Map<CriticalFileKind, number>();
+    for (const c of criticalFiles) {
+      countByKind.set(c.kind, (countByKind.get(c.kind) ?? 0) + 1);
+    }
+    const summary = [...countByKind.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([kind, n]) => `${CRITICAL_KIND_LABEL[kind]} (${n})`)
+      .join(", ");
+
+    // A bounded, representative sample of paths — never dump the whole list.
+    const sample = criticalFiles.slice(0, 8).map(c => c.path).join(", ");
+    const more   = criticalFiles.length > 8 ? ` …and ${criticalFiles.length - 8} more` : "";
+
+    findings.push({
+      id:          `${repoFullName}-implementation-critical-files`,
+      type:        "implementation",
+      title:       `${criticalFiles.length} critical file${criticalFiles.length > 1 ? "s" : ""} detected`,
+      description: `Files defining runtime behaviour by kind: ${summary}. Examples: ${sample}${more}.`,
+      confidence:  "confirmed",
+      agentReasoning: `Detected by filename during the tree scan: ${summary}. These files exist in the tree (path-evidence); content was not read.`,
+      metadata:    { criticalFileKinds: [...countByKind.keys()] },
+    });
+  }
+
   return findings;
-}
-
-// ─── Tree fingerprint ─────────────────────────────────────────
-
-/**
- * Derive a compact, deterministic fingerprint from a tree node list.
- * Used as a proxy for "root tree SHA" since RepoTree doesn't expose one.
- *
- * Algorithm: sort all blob SHAs, interleave first chars, slice to 40 chars.
- * Changes whenever any blob SHA changes (file modified/added/deleted).
- */
-function deriveTreeFingerprint(nodes: GitHubTreeNode[]): string {
-  const blobSHAs = nodes
-    .filter(n => n.type === "blob")
-    .map(n => n.sha)
-    .sort();
-
-  if (blobSHAs.length === 0) return "empty-tree";
-
-  // Simple interleave: take chars at rotating positions across sorted SHAs
-  const stride = Math.max(1, Math.floor(blobSHAs.length / 8));
-  const sample = blobSHAs
-    .filter((_, i) => i % stride === 0)
-    .map(sha => sha.slice(0, 5))
-    .join("");
-
-  return `tree-${blobSHAs.length}-${sample.slice(0, 32)}`;
 }
 
 // ─── Public API ───────────────────────────────────────────────
@@ -170,11 +188,33 @@ export interface AtlasAnalyzeParams {
   githubToken: string;
   /** agentId is always "atlas" — exposed for type consistency with other modules. */
   dryRun?: boolean;
+  /**
+   * Force a fresh analysis, bypassing the structural-fingerprint cache.
+   * Set when the user explicitly asks to refresh/re-run Atlas. Without it,
+   * Atlas serves stored findings whenever the architecture shape is unchanged.
+   */
+  force?: boolean;
 }
 
 export interface AtlasResult extends AgentResult {
   /** The architecture tree that Atlas derived. Null for empty repos. */
   architectureTree: ArchitectureTree | null;
+  /**
+   * Evidence-based capability nodes (Authentication, Messaging, …) inferred
+   * from the full path set. Deterministic, path-only — surfaced in the
+   * capability lens. Empty when no capability signals are present.
+   */
+  capabilities: Capability[];
+  /** Total number of repository paths Atlas can see (files + directories). */
+  totalPaths: number;
+  /** True when GitHub truncated the tree — capability/domain coverage partial. */
+  truncated: boolean;
+  /**
+   * Deterministic architecture graph (Atlas Relationship Engine, Increment A+B):
+   * system nodes + tiers from path capabilities, plus external-dependency edges
+   * derived from package.json. Render-agnostic — feeds the architecture canvas.
+   */
+  architectureGraph: ArchitectureGraph;
 }
 
 /**
@@ -189,11 +229,26 @@ export interface AtlasResult extends AgentResult {
 export async function analyzeRepoWithAtlas(
   params: AtlasAnalyzeParams
 ): Promise<AtlasResult> {
-  const { owner, repo, branch, githubToken, dryRun = false } = params;
+  const { owner, repo, branch, githubToken, dryRun = false, force = false } = params;
   const repoFullName = `${owner}/${repo}`;
 
   // 1. Fetch tree (uses 10-min in-process cache)
   const tree = await fetchRepoTree(owner, repo, branch, githubToken);
+
+  // 1b. Capability + path-visibility derivation (deterministic, path-only).
+  // Runs over the RAW node set (100% of paths incl. directories) so capability
+  // detection sees critical files even in normally-filtered locations. Cheap
+  // enough to recompute on every call, including cache hits.
+  const fullNodes  = tree.rawNodes ?? tree.nodes;
+  const capabilities = deriveCapabilities(fullNodes);
+  const totalPaths   = fullNodes.length;
+  const truncated    = tree.truncated ?? false;
+
+  // 1c. Atlas Relationship Engine (Increment A+B): system nodes + tiers, plus
+  // external-dependency edges from package.json. Deterministic, no AI. The
+  // dependency read is bounded (≤3 package.json files) and fail-open.
+  const dependencies     = await loadRepoDependencies(owner, repo, branch, githubToken, fullNodes);
+  const architectureGraph = buildArchitectureGraph({ nodes: fullNodes, dependencies, truncated });
 
   // 2. Build domain map — null guard handled below
   const domainMap = buildDomainMap(tree);
@@ -226,19 +281,27 @@ export async function analyzeRepoWithAtlas(
       nodeAttachments:  [],
       wasDeduped:       false,
       architectureTree: null,
+      capabilities,
+      totalPaths,
+      truncated,
+      architectureGraph,
     };
   }
 
-  // 4. Derive a tree fingerprint as a "blobSHA" for staleness detection.
-  // Atlas has no single root SHA (RepoTree doesn't expose it), so we use
-  // a compact fingerprint: sorted blob SHAs XOR'd by position.
-  // Changes whenever files are added, removed, or modified. Fast (no crypto).
-  const treeSHA = deriveTreeFingerprint(tree.nodes);
+  // 4. Derive a STRUCTURAL fingerprint as Atlas's "blobSHA" freshness key.
+  // Atlas findings depend only on architecture shape (domain counts, pressure,
+  // critical-file names) — never on file content. So this fingerprint is
+  // content-insensitive: a one-line edit that doesn't change structure yields
+  // the same value → cache hit → no wasted re-analysis. It changes only when
+  // the architecture changes (file added/removed/moved, critical file appears).
+  const treeSHA = deriveStructuralFingerprint(domainMap);
 
-  // 5. Check for fresh cached intelligence
-  const cached = await getFreshIntelligence(
-    repoFullName, ATLAS_REPO_FILE_PATH, branch, treeSHA, "atlas"
-  );
+  // 5. Check for fresh cached intelligence (skipped on an explicit refresh)
+  const cached = force
+    ? null
+    : await getFreshIntelligence(
+        repoFullName, ATLAS_REPO_FILE_PATH, branch, treeSHA, "atlas"
+      );
   if (cached) {
     console.log(`[atlas] cache_hit repo=${repoFullName} treeSHA=${treeSHA.slice(0, 8)}`);
     return {
@@ -251,6 +314,10 @@ export async function analyzeRepoWithAtlas(
       nodeAttachments:  cached.nodeIds,
       wasDeduped:       true,
       architectureTree,
+      capabilities,
+      totalPaths,
+      truncated,
+      architectureGraph,
     };
   }
 
@@ -265,11 +332,17 @@ export async function analyzeRepoWithAtlas(
       nodeAttachments:  [],
       wasDeduped:       false,
       architectureTree,
+      capabilities,
+      totalPaths,
+      truncated,
+      architectureGraph,
     };
   }
 
   // 6. Derive structural findings (no AI call)
-  const findings = deriveArchitectureFindings(architectureTree, repoFullName);
+  const findings = deriveArchitectureFindings(
+    architectureTree, repoFullName, domainMap.criticalFiles
+  );
 
   // 7. Node IDs — atlas attaches to section-domains (all domain nodes)
   const nodeIds = architectureTree.domains.length > 0
@@ -317,5 +390,9 @@ export async function analyzeRepoWithAtlas(
     nodeAttachments:  nodeIds,
     wasDeduped,
     architectureTree,
+    capabilities,
+    totalPaths,
+    truncated,
+    architectureGraph,
   };
 }
