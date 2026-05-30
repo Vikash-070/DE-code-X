@@ -1,0 +1,42 @@
+# Render Blueprint — DE-code X (Next.js web service)
+#
+# Render runs the app as a long-lived Node server, which fits this repo: apps/web
+# has no package.json, so we build + start from the root. The build generates the
+# Prisma client, then builds Next; start runs the Next production server on $PORT.
+#
+# Secrets are NOT stored here (sync: false) — set them in the Render dashboard
+# (Environment tab) or "Secret" group. NEXT_PUBLIC_* must be present at BUILD time
+# (Next inlines them into the client bundle), so add them before the first deploy.
+#
+# Deploy: New → Blueprint → connect Vikash-070/DE-code-X → pick branch → fill envs.
+
+services:
+  - type: web
+    name: decode-x
+    runtime: node
+    plan: starter            # bump to standard+ for more memory/always-on
+    region: oregon           # pick the region closest to your users / DB
+    branch: main
+    autoDeploy: true
+    buildCommand: npm install && npm run build:prod
+    startCommand: npm run start:prod
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production
+      # ── Secrets — set these in the dashboard (never commit values) ──
+      - key: DATABASE_URL                      # Supabase Postgres (use the pooked/6543 URL for serverless drivers)
+        sync: false
+      - key: ENCRYPTION_KEY                    # 32-byte key (AES-256-GCM); generate fresh for prod, keep stable
+        sync: false
+      - key: CLERK_SECRET_KEY                  # Clerk PRODUCTION secret (sk_live_…)
+        sync: false
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY # Clerk PRODUCTION publishable (pk_live_…) — needed at build
+        sync: false
+      # ── Optional Clerk routing (only if you override defaults) ──
+      - key: NEXT_PUBLIC_CLERK_SIGN_IN_URL
+        sync: false
+      - key: NEXT_PUBLIC_CLERK_SIGN_UP_URL
+        sync: false

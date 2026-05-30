@@ -2,6 +2,9 @@
   "name": "decode-x-platform",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -11,6 +14,8 @@
     "build": "dotenv -e .env -- next build apps/web",
     "start": "dotenv -e .env -- next start apps/web",
     "lint": "dotenv -e .env -- next lint apps/web",
+    "build:prod": "prisma generate --schema packages/config/prisma/schema.prisma && next build apps/web",
+    "start:prod": "next start apps/web -p ${PORT:-3000}",
     "prisma:generate": "dotenv -e .env -- prisma generate --schema packages/config/prisma/schema.prisma",
     "prisma:migrate": "dotenv -e .env -- prisma migrate dev --schema packages/config/prisma/schema.prisma",
     "prisma:studio": "dotenv -e .env -- prisma studio --schema packages/config/prisma/schema.prisma",
