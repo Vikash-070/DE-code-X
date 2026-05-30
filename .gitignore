@@ -7,6 +7,15 @@ build
 # ── Dependencies ──────────────────────────────────────────
 node_modules
 
+# ── Package-manager caches (never commit) ─────────────────
+.npm-cache
+.npm
+.yarn/cache
+.pnpm-store
+
+# ── Next.js generated ─────────────────────────────────────
+next-env.d.ts
+
 # ── Environment files ─────────────────────────────────────
 # The canonical runtime file is .env at the repo root — NEVER commit it.
 # All .env* patterns are excluded; only .env.example (the template) is allowed.
