@@ -79,7 +79,7 @@ export function NotableFindingsPanel() {
           >
             <Sparkles className="h-3 w-3" /> Find notable issues
           </button>
-          <p className="text-[9px] text-zinc-700">Scans ~20 high-signal files · 1 paid OpenRouter call · cached after.</p>
+          <p className="text-[9px] text-zinc-700">Scans ~20 high-signal files (secrets excluded) · their contents are sent to your AI provider · 1 paid OpenRouter call · cached after.</p>
         </div>
       )}
 

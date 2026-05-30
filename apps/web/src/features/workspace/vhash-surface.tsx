@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
-import { ArrowUp, Code2, Loader2 } from "lucide-react";
+import { ArrowUp, Code2, Loader2, Paperclip, X, FileText } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
 import type { GitHubRepositorySummary } from "@/services/github/types";
@@ -11,6 +11,7 @@ import type { CipherFinding } from "@/types/intelligence";
 
 import type {
   AssistantMessage,
+  AttachedDocument,
   CipherMessage,
   SessionMessage,
   StreamState,
@@ -481,7 +482,7 @@ function WorkspaceInput({
   initialValue = "",
   suggestions = [],
 }: {
-  onSubmit:      (text: string) => void;
+  onSubmit:      (text: string, doc?: AttachedDocument) => void;
   disabled:      boolean;
   /** Pre-fills the input — used when navigating from Architecture Workspace via "Ask V#". */
   initialValue?: string;
@@ -493,6 +494,10 @@ function WorkspaceInput({
   suggestions?: string[];
 }) {
   const [value, setValue] = useState(initialValue);
+  const [attached, setAttached] = useState<AttachedDocument | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Sync when initialValue changes (e.g. after URL param is read on first render)
   const prevInitial = useRef(initialValue);
@@ -503,11 +508,37 @@ function WorkspaceInput({
     }
   }, [initialValue]);
 
+  async function handleFile(file: File) {
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/repo/reference/document", { method: "POST", body: fd });
+      const json = (await res.json()) as { text?: string; title?: string; error?: string };
+      if (!res.ok || !json.text) {
+        setUploadError(json.error ?? "Couldn't read that file.");
+        return;
+      }
+      setAttached({ text: json.text, title: json.title ?? file.name });
+    } catch {
+      setUploadError("Upload failed. Try again.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   function handleSubmit() {
+    if (disabled || uploading) return;
     const trimmed = value.trim();
-    if (!trimmed || trimmed.length < 2 || disabled) return;
-    onSubmit(trimmed);
+    // Allow sending with just an attached document (default the prompt).
+    if (!trimmed && !attached) return;
+    if (trimmed.length < 2 && !attached) return;
+    const text = trimmed || "Read this document and tell me how to apply it to my repo — what it would improve and what it touches.";
+    onSubmit(text, attached ?? undefined);
     setValue("");
+    setAttached(null);
+    setUploadError(null);
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -517,7 +548,7 @@ function WorkspaceInput({
     }
   }
 
-  const canSubmit = !disabled && value.trim().length >= 2;
+  const canSubmit = !disabled && !uploading && (value.trim().length >= 2 || !!attached);
 
   return (
     <div className="shrink-0 px-8 pb-6 pt-4">
@@ -536,23 +567,63 @@ function WorkspaceInput({
           ))}
         </div>
       )}
+
+      {/* Attached document chip / upload error */}
+      {attached && (
+        <div className="mb-2 inline-flex max-w-full items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.05] px-2.5 py-1.5">
+          <FileText className="h-3 w-3 shrink-0 text-emerald-400/80" />
+          <span className="truncate text-[11px] text-zinc-300">{attached.title}</span>
+          <button
+            type="button"
+            onClick={() => setAttached(null)}
+            className="grid h-4 w-4 shrink-0 place-items-center rounded text-zinc-500 hover:text-zinc-200"
+            aria-label="Remove attachment"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
+      {uploadError && <p className="mb-2 px-1 text-[10px] text-amber-500/70">{uploadError}</p>}
+
       <div
         className={cn(
           "flex items-end gap-3 rounded-2xl border bg-white/[0.02] px-5 py-3.5 transition-colors duration-200",
           disabled
             ? "border-white/[0.04]"
-            : value.trim().length > 0
+            : value.trim().length > 0 || attached
               ? "border-white/[0.12]"
               : "border-white/[0.06] focus-within:border-white/[0.16]"
         )}
       >
+        {/* Attach document */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".txt,.md,.markdown,.mdx,.csv,.tsv,.json,.log,.yml,.yaml,.rst,text/*,application/json"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void handleFile(f);
+            e.target.value = ""; // allow re-selecting the same file
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={disabled || uploading}
+          title="Attach a document"
+          className="mb-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-white/[0.06] text-zinc-500 transition-colors hover:border-white/20 hover:text-zinc-300 disabled:opacity-40"
+        >
+          {uploading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Paperclip className="h-3 w-3" />}
+        </button>
+
         <textarea
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={disabled}
           rows={1}
-          placeholder="Ask about the architecture, or describe what you want to build…"
+          placeholder={attached ? "Add a question, or just send to map this document to your repo…" : "Ask about the architecture, paste a link, or attach a document…"}
           className="flex-1 resize-none bg-transparent text-sm leading-6 text-zinc-200 placeholder-zinc-600 outline-none disabled:opacity-40"
           style={{ maxHeight: "160px", overflowY: "auto" }}
           onInput={(e) => {
@@ -579,7 +650,7 @@ function WorkspaceInput({
         </button>
       </div>
       <p className="mt-2 px-1 text-[10px] text-zinc-800">
-        ↵ to send  ·  Shift+↵ for new line
+        ↵ to send  ·  Shift+↵ for new line  ·  📎 .txt / .md / .csv / .json
       </p>
     </div>
   );
@@ -633,7 +704,7 @@ export function VHashSurface({
   /** True when the active orchestration request includes a reference URL */
   isReferenceMode?:  boolean;
   activeRepository:  GitHubRepositorySummary | null;
-  onDirective:       (text: string) => void;
+  onDirective:       (text: string, doc?: AttachedDocument) => void;
   /** Pre-fills the chat input. Set when navigating from Architecture Workspace via "Ask V#". */
   prefillMessage?:   string;
   /** Gap-analysis suggestion chips shown above the input. */

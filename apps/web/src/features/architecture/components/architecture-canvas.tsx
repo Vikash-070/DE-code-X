@@ -809,7 +809,7 @@ function FileInspector({
                 >
                   <Sparkles className="h-3 w-3" /> Explain this file
                 </button>
-                <p className="text-[9px] text-zinc-700">Uses 1 paid OpenRouter call · cached after.</p>
+                <p className="text-[9px] text-zinc-700">Uses 1 paid OpenRouter call · this file&apos;s content is sent to your AI provider · cached after.</p>
               </div>
             )}
             {narration.status === "loading" && (

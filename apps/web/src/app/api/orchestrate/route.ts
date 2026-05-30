@@ -79,6 +79,7 @@ import {
   formatAtlasResult,
   formatPaidResult,
 } from "@/server/repo/agent-orchestration";
+import { sameOrigin }               from "@/server/security/guards";
 import { analyzeRepoWithAtlas }     from "@/server/repo/atlas-analyzer";
 import { analyzeFileWithCipher }    from "@/server/repo/cipher-analyzer";
 import { analyzeFileWithSentinel }  from "@/server/repo/sentinel-analyzer";
@@ -125,6 +126,8 @@ interface OrchestrationRequest {
   repositoryContext: RepoContextInput;
   /** Optional: a reference URL extracted client-side from the message */
   referenceUrl?:     string;
+  /** Optional: text extracted from an uploaded document (treated as a reference source) */
+  referenceDocument?: { text: string; title?: string };
 }
 
 // ─── OpenRouter streaming ─────────────────────────────────
@@ -908,6 +911,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   }
 
+  // CSRF: reject cross-site POSTs to this spend/data endpoint.
+  if (!sameOrigin(request)) {
+    return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
+  }
+
   // ── 2. Parse body ─────────────────────────────────────────
   let body: OrchestrationRequest;
   try {
@@ -916,12 +924,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { message, history = [], repositoryContext, referenceUrl } = body;
+  const { message, history = [], repositoryContext, referenceUrl, referenceDocument } = body;
   if (!message?.trim()) {
     return NextResponse.json({ error: "message is required" }, { status: 422 });
   }
 
-  const hasReference = Boolean(referenceUrl?.trim());
+  // An uploaded document is treated as a reference source, just like a URL —
+  // it flows through the same intent → evaluation → map-to-repo pipeline.
+  const hasDocument  = Boolean(referenceDocument?.text?.trim());
+  const hasReference = Boolean(referenceUrl?.trim()) || hasDocument;
 
   // Detect reference intent early — determines which pipeline stages activate.
   // understanding → skip Stage 3+3.5+4 (saves ~550-850ms + one LLM call)
@@ -1172,14 +1183,21 @@ export async function POST(request: Request) {
     console.log(`[v# routing] intent_match module=${detectedModule.agentId} message_len=${message.trim().length}`);
   }
 
-  // Reference content fetch — runs concurrently, hard 5s cap.
+  // Reference content — an uploaded document is used directly (no fetch); a URL
+  // is fetched concurrently with a hard 5s cap.
   const referenceContentPromise: Promise<ReferenceContent | null> =
-    hasReference
-      ? Promise.race([
-          fetchReferenceContent(referenceUrl!),
-          new Promise<null>((r) => setTimeout(() => r(null), REFERENCE_TIMEOUT_MS))
-        ]).catch(() => null)
-      : Promise.resolve(null);
+    hasDocument
+      ? Promise.resolve({
+          parsed: { type: "document", id: "", url: "" },
+          text:   referenceDocument!.text,
+          title:  referenceDocument!.title,
+        })
+      : Boolean(referenceUrl?.trim())
+        ? Promise.race([
+            fetchReferenceContent(referenceUrl!),
+            new Promise<null>((r) => setTimeout(() => r(null), REFERENCE_TIMEOUT_MS))
+          ]).catch(() => null)
+        : Promise.resolve(null);
 
   // ── 5. Create stream and return IMMEDIATELY ───────────────
   const encoder = new TextEncoder();
@@ -1203,6 +1221,24 @@ export async function POST(request: Request) {
       let firstTokenTimeoutId:  ReturnType<typeof setTimeout> | null = null;
 
       try {
+        // ── 5.-1 Instagram reference: paste-the-caption fallback ──
+        // Instagram exposes no content to apps (no transcript, no public API,
+        // oEmbed is gated behind a Meta token). Rather than fail a fetch, ask
+        // the user to paste the caption/idea — which then flows through the
+        // normal repo-grounded pipeline. (YouTube/X still auto-fetch.)
+        if (referenceUrl?.trim() && parseReferenceUrl(referenceUrl).type === "instagram") {
+          console.log(`[reference] instagram_paste_fallback`);
+          const repoName = repositoryContext?.name ?? "your repo";
+          write(
+            "That's an Instagram link — and Instagram doesn't let apps read a post's content " +
+            "(no transcript or public API). So I can't pull it in automatically.\n\n" +
+            `Paste the **caption** here — or a few lines on what the creator is proposing — and I'll map it to ` +
+            `**${repoName}**: which systems it touches, how to build it here, and what it'd improve.\n\n` +
+            "_Tip: if the same idea is on YouTube or X, paste that link instead and I'll read it directly._"
+          );
+          return;
+        }
+
         // ── 5.0 Agent orchestration interception ──────────────
         // V# is the only interface. Detect explicit module-control intents
         // ("what agents", "run atlas", "use cipher", "confirm cipher <path>")

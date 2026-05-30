@@ -13,6 +13,15 @@ import type { CipherAgentState, AgentActivity } from "./agent-activity-panel";
 import { CIPHER_IDLE, NO_ACTIVITY }             from "./agent-activity-panel";
 import { VHashSurface }                         from "./vhash-surface";
 
+// ─── Attached document (reference source) ────────────────
+
+export interface AttachedDocument {
+  /** Extracted plain text from the uploaded file. */
+  text: string;
+  /** Original filename — shown as the source title. */
+  title: string;
+}
+
 // ─── Message types ────────────────────────────────────────
 
 export interface SystemMessage {
@@ -373,7 +382,7 @@ export function WorkspaceSession({
   }, [messages, activeRepository, triggerCipher]);
 
   const handleDirective = useCallback(
-    async (text: string) => {
+    async (text: string, referenceDocument?: AttachedDocument) => {
       if (!text.trim() || isOrchestrating || !activeRepository) return;
 
       // ── File path in user message → trigger Cipher ──────
@@ -387,7 +396,8 @@ export function WorkspaceSession({
       const referenceUrl = extractReferenceUrl(text.trim()) ?? undefined;
       // Detect gap intent up front so we can show follow-up chips once the
       // response completes. Mirrors the server's detectGapIntent() routing.
-      const isGapQuery = !referenceUrl && detectGapIntent(text.trim());
+      // A reference (URL or document) takes precedence over gap routing.
+      const isGapQuery = !referenceUrl && !referenceDocument && detectGapIntent(text.trim());
       // Clear any previous follow-ups while this turn streams.
       setGapFollowUpsActive(false);
       const userMsg: UserMessage = {
@@ -398,7 +408,7 @@ export function WorkspaceSession({
       };
       setMessages((prev) => [...prev, userMsg]);
       setIsOrchestrating(true);
-      setIsReferenceMode(!!referenceUrl);
+      setIsReferenceMode(!!referenceUrl || !!referenceDocument);
       // Tell the Agent Team panel which module is running and what it's doing.
       onActivityChangeRef.current?.(deriveActivity(text.trim()));
 
@@ -430,6 +440,9 @@ export function WorkspaceSession({
             message: text.trim(),
             history,
             referenceUrl,
+            referenceDocument: referenceDocument
+              ? { text: referenceDocument.text, title: referenceDocument.title }
+              : undefined,
             repositoryContext: {
               fullName:   activeRepository.fullName,
               name:       activeRepository.name,

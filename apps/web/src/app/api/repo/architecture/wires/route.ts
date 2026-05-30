@@ -23,6 +23,7 @@ import {
   parseTsconfigAliases,
   type ImportGraph,
 } from "@/server/repo/import-graph";
+import { rateLimit } from "@/server/security/guards";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,16 @@ export interface WiresResponse extends ImportGraph {
 export async function GET(request: Request): Promise<Response> {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+
+  // Rate limit: each scan can read up to MAX_ANCHORS files from GitHub —
+  // 10 per 5 minutes per user protects the shared GitHub rate budget.
+  const rl = rateLimit(`wires:${userId}`, 10, 5 * 60_000);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Too many scans. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } }
+    );
+  }
 
   const url    = new URL(request.url);
   const owner  = url.searchParams.get("owner")?.trim();

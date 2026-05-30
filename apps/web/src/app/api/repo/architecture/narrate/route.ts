@@ -18,8 +18,9 @@ import { prisma }             from "@/lib/prisma";
 import { decryptKey }         from "@/server/ai/encryption";
 import { OPENROUTER_KEY_PREFIX } from "@/server/ai/constants";
 import { fetchFileContent }   from "@/services/github/file";
-import { classifyFile }       from "@/server/repo/file-map";
+import { classifyFile, isSensitivePath } from "@/server/repo/file-map";
 import { narrateFile, type FileNarration } from "@/server/repo/narration";
+import { rateLimit, sameOrigin } from "@/server/security/guards";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,20 @@ export async function POST(request: Request): Promise<Response> {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
 
+  // CSRF: reject cross-site POSTs.
+  if (!sameOrigin(request)) {
+    return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
+  }
+
+  // Rate limit: paid AI call — 30 per 5 minutes per user.
+  const rl = rateLimit(`narrate:${userId}`, 30, 5 * 60_000);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Too many requests. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } }
+    );
+  }
+
   let body: NarrateRequest;
   try {
     body = (await request.json()) as NarrateRequest;
@@ -57,6 +72,14 @@ export async function POST(request: Request): Promise<Response> {
   const path  = body.path?.trim();
   if (!owner || !repo || !path) {
     return NextResponse.json({ error: "owner, repo and path are required" }, { status: 422 });
+  }
+
+  // Never send secrets/credentials to the AI provider.
+  if (isSensitivePath(path)) {
+    return NextResponse.json(
+      { error: "This file looks like it holds secrets — I won't send it to the AI provider." },
+      { status: 400 }
+    );
   }
   const repoFullName = `${owner}/${repo}`;
 

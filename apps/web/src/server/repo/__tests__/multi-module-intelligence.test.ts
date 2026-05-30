@@ -40,7 +40,8 @@ import {
   parsePackageDependencies,
   toWires,
 } from "@/server/repo/architecture-wire";
-import { classifyFile, buildFileMap } from "@/server/repo/file-map";
+import { classifyFile, buildFileMap, isSensitivePath } from "@/server/repo/file-map";
+import { rateLimit, sameOrigin, tooLargeByHeader, _resetRateLimits } from "@/server/security/guards";
 import {
   parseImports,
   parseTsconfigAliases,
@@ -50,6 +51,7 @@ import {
 } from "@/server/repo/import-graph";
 import { parseNarration } from "@/server/repo/narration";
 import { parseFindings } from "@/server/repo/findings";
+import { parseReferenceUrl, extractReferenceUrl } from "@/services/reference/url-parser";
 import type { ArchitectureTree, CipherFinding as IntelCipherFinding } from "@/types/intelligence";
 import {
   ATLAS_RECORDS,
@@ -1552,5 +1554,88 @@ describe("Test 20: findings — parseFindings", () => {
   it("returns [] for unusable input", () => {
     expect(parseFindings("nope")).toEqual([]);
     expect(parseFindings("")).toEqual([]);
+  });
+});
+
+// ─── Test 21: Security guards ────────────────────────────────────────────────
+
+describe("Test 21: security — rateLimit", () => {
+  it("allows up to max, then blocks with a retry hint, then recovers after the window", () => {
+    _resetRateLimits();
+    const t0 = 1_000_000;
+    expect(rateLimit("k1", 2, 1000, t0).allowed).toBe(true);
+    expect(rateLimit("k1", 2, 1000, t0 + 1).allowed).toBe(true);
+    const blocked = rateLimit("k1", 2, 1000, t0 + 2);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterSec).toBeGreaterThan(0);
+    // After the window slides past the first hit, allowed again.
+    expect(rateLimit("k1", 2, 1000, t0 + 1001).allowed).toBe(true);
+  });
+
+  it("isolates keys", () => {
+    _resetRateLimits();
+    const t = 2_000_000;
+    expect(rateLimit("a", 1, 1000, t).allowed).toBe(true);
+    expect(rateLimit("a", 1, 1000, t).allowed).toBe(false);
+    expect(rateLimit("b", 1, 1000, t).allowed).toBe(true); // different key unaffected
+  });
+});
+
+describe("Test 21b: security — sameOrigin + tooLargeByHeader", () => {
+  const req = (headers: Record<string, string>) =>
+    ({ headers: new Headers(headers) } as unknown as Request);
+
+  it("allows same-origin and missing-origin, rejects cross-origin", () => {
+    expect(sameOrigin(req({ origin: "https://app.example", host: "app.example" }))).toBe(true);
+    expect(sameOrigin(req({ host: "app.example" }))).toBe(true); // no Origin → not a CSRF vector
+    expect(sameOrigin(req({ origin: "https://evil.example", host: "app.example" }))).toBe(false);
+  });
+
+  it("honors x-forwarded-host (proxy / tunnel)", () => {
+    expect(sameOrigin(req({ origin: "https://app.example", "x-forwarded-host": "app.example", host: "internal:3000" }))).toBe(true);
+  });
+
+  it("flags oversized Content-Length, ignores missing/under", () => {
+    expect(tooLargeByHeader(req({ "content-length": String(10_000) }), 5_000)).toBe(true);
+    expect(tooLargeByHeader(req({ "content-length": String(1_000) }), 5_000)).toBe(false);
+    expect(tooLargeByHeader(req({}), 5_000)).toBe(false);
+  });
+});
+
+describe("Test 21c: security — isSensitivePath", () => {
+  it("flags secret files, allows example/source files", () => {
+    expect(isSensitivePath(".env")).toBe(true);
+    expect(isSensitivePath("apps/web/.env.production")).toBe(true);
+    expect(isSensitivePath("certs/server.pem")).toBe(true);
+    expect(isSensitivePath(".ssh/id_rsa")).toBe(true);
+    expect(isSensitivePath("config/service-account.json")).toBe(true);
+    // Non-secret companions + normal source.
+    expect(isSensitivePath(".env.example")).toBe(false);
+    expect(isSensitivePath("src/app.tsx")).toBe(false);
+    expect(isSensitivePath("README.md")).toBe(false);
+  });
+});
+
+// ─── Test 21: Instagram reference detection (paste fallback) ──────────────────
+
+describe("Test 21: url-parser — Instagram", () => {
+  it("parses reel / post / tv URLs to type instagram", () => {
+    expect(parseReferenceUrl("https://www.instagram.com/reel/Cabc-123_x/").type).toBe("instagram");
+    expect(parseReferenceUrl("https://instagram.com/p/Cabc123/").type).toBe("instagram");
+    expect(parseReferenceUrl("https://www.instagram.com/tv/Cxyz789/").type).toBe("instagram");
+    expect(parseReferenceUrl("https://instagram.com/creator/reel/Cabc123/").type).toBe("instagram");
+  });
+
+  it("captures the shortcode as id", () => {
+    expect(parseReferenceUrl("https://www.instagram.com/reel/Cabc-123_x/").id).toBe("Cabc-123_x");
+  });
+
+  it("does not misclassify a profile URL as a reference", () => {
+    expect(parseReferenceUrl("https://instagram.com/somecreator").type).toBe("unsupported");
+  });
+
+  it("client extractor detects an Instagram URL in prose", () => {
+    const url = extractReferenceUrl("saw this great idea https://www.instagram.com/reel/Cabc123/ what do you think?");
+    expect(url).toContain("instagram.com/reel/Cabc123");
   });
 });

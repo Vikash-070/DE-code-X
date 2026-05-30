@@ -18,7 +18,7 @@
  * detectable URL", not "return a clean URL". The server sanitizes.
  */
 
-export type ReferenceUrlType = "youtube" | "loom" | "twitter" | "unsupported";
+export type ReferenceUrlType = "youtube" | "loom" | "twitter" | "instagram" | "document" | "unsupported";
 
 export interface ParsedReferenceUrl {
   type:    ReferenceUrlType;
@@ -51,7 +51,7 @@ export interface ParsedReferenceUrl {
 // The server-side parseReferenceUrl() (URL() constructor) does full validation.
 
 export const REFERENCE_URL_RE =
-  /https?:\/\/(?:(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?[^\s]*v=[A-Za-z0-9_-]{11}|shorts\/[A-Za-z0-9_-]{11}|embed\/[A-Za-z0-9_-]{11}|live\/[A-Za-z0-9_-]{11})|youtu\.be\/[A-Za-z0-9_-]{11})|(?:www\.)?loom\.com\/share\/[a-f0-9]{32,}|(?:www\.)?(?:twitter|x)\.com\/\S+\/status\/\d+)[^\s]*/i;
+  /https?:\/\/(?:(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?[^\s]*v=[A-Za-z0-9_-]{11}|shorts\/[A-Za-z0-9_-]{11}|embed\/[A-Za-z0-9_-]{11}|live\/[A-Za-z0-9_-]{11})|youtu\.be\/[A-Za-z0-9_-]{11})|(?:www\.)?loom\.com\/share\/[a-f0-9]{32,}|(?:www\.)?(?:twitter|x)\.com\/\S+\/status\/\d+|(?:www\.)?instagram\.com\/(?:[A-Za-z0-9_.]+\/)?(?:reels?|p|tv)\/[A-Za-z0-9_-]+)[^\s]*/i;
 
 /**
  * Detect whether a text string contains a supported reference URL.
@@ -195,6 +195,18 @@ export function parseReferenceUrl(raw: string): ParsedReferenceUrl {
         const canonicalUrl = `https://x.com${u.pathname}`;
         console.log(`[reference] url_detected platform=twitter tweetId=${statusMatch[1]}`);
         return { type: "twitter", id: statusMatch[1]!, url: canonicalUrl };
+      }
+    }
+
+    // ── Instagram ─────────────────────────────────────────
+    // Reels / posts / IGTV. Instagram exposes no content to apps (no transcript
+    // or public oEmbed), so the `id` (shortcode) is captured for routing only —
+    // the orchestrator serves a paste-the-caption fallback for this type.
+    if (host === "instagram.com") {
+      const igMatch = /\/(?:reels?|p|tv)\/([A-Za-z0-9_-]+)/.exec(u.pathname);
+      if (igMatch) {
+        console.log(`[reference] url_detected platform=instagram shortcode=${igMatch[1]!.slice(0, 8)}…`);
+        return { type: "instagram", id: igMatch[1]!, url: sanitized };
       }
     }
 

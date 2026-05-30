@@ -18,9 +18,10 @@ import { decryptKey }         from "@/server/ai/encryption";
 import { OPENROUTER_KEY_PREFIX } from "@/server/ai/constants";
 import { fetchRepoTree }      from "@/services/github/tree";
 import { fetchFileContent }   from "@/services/github/file";
-import { buildFileMap }       from "@/server/repo/file-map";
+import { buildFileMap, isSensitivePath } from "@/server/repo/file-map";
 import { selectAnchors }      from "@/server/repo/import-graph";
 import { findNotableIssues, type NotableFinding } from "@/server/repo/findings";
+import { rateLimit, sameOrigin } from "@/server/security/guards";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,18 @@ interface FindingsRequest { owner?: string; repo?: string; branch?: string; }
 export async function POST(request: Request): Promise<Response> {
   const { userId } = await auth();
   if (!userId) return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+
+  if (!sameOrigin(request)) {
+    return NextResponse.json({ error: "Cross-origin request rejected." }, { status: 403 });
+  }
+  // Rate limit: heavy multi-file paid call — 6 per 5 minutes per user.
+  const rl = rateLimit(`findings:${userId}`, 6, 5 * 60_000);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: "Too many requests. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } }
+    );
+  }
 
   let body: FindingsRequest;
   try { body = (await request.json()) as FindingsRequest; }
@@ -84,7 +97,9 @@ export async function POST(request: Request): Promise<Response> {
   catch { return NextResponse.json({ error: `Could not read ${repoFullName}.` }, { status: 502 }); }
 
   const fileMap = buildFileMap(tree.rawNodes ?? tree.nodes);
-  const { anchors } = selectAnchors(fileMap.files, MAX_FINDING_FILES);
+  // Defense-in-depth: never feed secret files to the AI provider.
+  const safeFiles = fileMap.files.filter((f) => !isSensitivePath(f.path));
+  const { anchors } = selectAnchors(safeFiles, MAX_FINDING_FILES);
   if (anchors.length === 0) {
     return NextResponse.json({ findings: [], fromCache: false });
   }

@@ -87,6 +87,21 @@ function isVendorPath(lowerPath: string): boolean {
   return false;
 }
 
+/**
+ * True when a path likely holds secrets/credentials and must NOT be sent to the
+ * AI provider (narration / findings). Allows non-secret companions like
+ * `.env.example` / `.env.sample` / `.env.template`.
+ */
+export function isSensitivePath(path: string): boolean {
+  const file = (path.split("/").pop() ?? path).toLowerCase();
+  // .env and real variants, but not .env.example/.sample/.template/.dist
+  if (/^\.env(\.(local|development|production|staging|test))?$/.test(file)) return true;
+  if (/\.(pem|key|p12|pfx|keystore|jks|crt|cer)$/.test(file)) return true;
+  if (/^id_(rsa|ed25519|ecdsa|dsa)$/.test(file)) return true;
+  if (/(secret|credential|\.npmrc|\.pgpass|\.htpasswd|service-account)/.test(file)) return true;
+  return false;
+}
+
 // ─── Classifier ───────────────────────────────────────────────
 
 /**
