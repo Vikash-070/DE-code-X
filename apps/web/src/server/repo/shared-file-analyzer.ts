@@ -25,6 +25,7 @@ import {
 } from "@/server/repo/intelligence-store";
 import { generateEmbedding, buildEmbeddingText, EMBEDDING_MODEL } from "@/server/ai/providers/embeddings";
 import { upsertFileEmbedding }    from "@/server/repo/embedding-store";
+import { ANALYZER_MAX_TOKENS }    from "@/server/ai/constants";
 import type { CipherFinding, AgentId, AgentResult } from "@/types/intelligence";
 
 // ─── Types ────────────────────────────────────────────────────
@@ -76,8 +77,8 @@ ${fileContent}
 Return a JSON array of findings. Return [] if nothing notable.`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  type CompletionOpts = { system: string; model?: any; temperature: number };
-  const opts: CompletionOpts = { system: systemPrompt, model: config.model, temperature: 0.1 };
+  type CompletionOpts = { system: string; model?: any; temperature: number; maxTokens: number };
+  const opts: CompletionOpts = { system: systemPrompt, model: config.model, temperature: 0.1, maxTokens: ANALYZER_MAX_TOKENS };
 
   let raw: string;
 

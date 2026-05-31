@@ -117,6 +117,32 @@ const NO_PROGRESS_TIMEOUT_MS  = 15_000;
 // Hard cap for reference content fetch (YouTube transcript, Loom oEmbed)
 const REFERENCE_TIMEOUT_MS    = 5_000;
 
+// ─── Provider error → actionable user message ─────────────
+// Paid analyzers throw raw provider errors ("OpenRouter API error 402: …").
+// Map the common cases to clear, actionable guidance so the user knows exactly
+// what to do, instead of seeing a raw status code.
+function friendlyProviderError(raw: string, displayName: string, filePath: string): string {
+  const m = raw.toLowerCase();
+  if (m.includes("402") || m.includes("credits") || m.includes("afford")) {
+    return `**${displayName}** couldn't run — your OpenRouter account is **out of credits**. ` +
+      `Add credits at https://openrouter.ai/settings/credits, then try again. (No charge was made.)`;
+  }
+  if (m.includes("401") || m.includes("authentication failed") || m.includes("invalid api key")) {
+    return `**${displayName}** couldn't run — OpenRouter **rejected your API key**. ` +
+      `Re-save a valid key (starts with sk-or-…) in Settings → AI Providers.`;
+  }
+  if (m.includes("429") || m.includes("rate limit")) {
+    return `**${displayName}** hit OpenRouter's **rate limit**. Wait a few seconds and try again.`;
+  }
+  if (m.includes("not found in tree") || m.includes("404")) {
+    return `I couldn't find \`${filePath}\` in this repository. Check the path and try again.`;
+  }
+  if (m.includes("timeout") || m.includes("etimedout") || m.includes("econnrefused")) {
+    return `**${displayName}** timed out reaching the AI provider. Try again in a moment.`;
+  }
+  return `I couldn't analyze \`${filePath}\` with ${displayName}: ${raw.slice(0, 200)}`;
+}
+
 // ─── Types ────────────────────────────────────────────────
 
 export type ConversationTurn = RetrievalTurn;
@@ -170,6 +196,9 @@ async function* streamOpenRouter(
     if (err instanceof OpenAI.APIError) {
       if (err.status === 401 || err.status === 403) {
         throw new Error("OpenRouter authentication failed. Check your API key in Settings → AI Providers.");
+      }
+      if (err.status === 402) {
+        throw new Error("OpenRouter account is out of credits. Add credits at openrouter.ai/settings/credits, then try again.");
       }
       if (err.status === 429) {
         throw new Error("OpenRouter rate limit exceeded. Wait a moment and try again.");
@@ -1448,7 +1477,7 @@ export async function POST(request: Request) {
             } catch (err) {
               const m = err instanceof Error ? err.message : "unknown error";
               console.log(`[orchestrate] orchestration_paid_error agent=${orchestration.agentId} err=${m}`);
-              write(`I couldn't analyze \`${resolvedFilePath}\` with ${displayName}: ${m}`);
+              write(friendlyProviderError(m, displayName, resolvedFilePath));
               return;
             }
 

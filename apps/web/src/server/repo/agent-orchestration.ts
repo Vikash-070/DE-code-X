@@ -147,9 +147,6 @@ const TOPOLOGY_LENS_RE = /\bmap\b|\btopolog|\bfolders?\b|\bdirector|\blayout\b|f
 /** A control verb must accompany a paid module name to avoid false positives. */
 const PAID_VERB_RE = /\b(use|run|ask|analy[sz]e|with|invoke|call|confirm)\b/;
 
-/** Confirm signal for the stateless spend handshake. */
-const CONFIRM_RE = /\b(confirm|confirmed|proceed|go ahead|yes)\b/;
-
 /** Refresh signal — forces a fresh Atlas run instead of serving cache. */
 const REFRESH_RE = /\b(refresh|re-?run|rerun|again|fresh|re-?analy[sz]e)\b/;
 
@@ -175,24 +172,25 @@ export function detectOrchestrationAction(rawMessage: string): OrchestrationActi
   // 2. Paid module dispatch (cipher / sentinel / pulse).
   //    A control verb is required so prose like "the pulse of the feed" or
   //    "a sentinel value" does NOT trigger a paid run.
+  //
+  //    ONE-STEP: naming a paid agent + ANY file reference (full path OR a
+  //    partial name/dir) runs the agent immediately — no separate "confirm"
+  //    turn. We only ask a follow-up when no file is named at all, because
+  //    there is literally nothing to analyze. The explicit agent name + file
+  //    is treated as the spend authorization.
   const paidAgent = detectPaidAgent(msg);
   if (paidAgent) {
     const filePath = extractFilePath(rawMessage);
-    if (CONFIRM_RE.test(msg)) {
-      if (filePath) {
-        // Full resolved path — run immediately.
-        return { kind: "run-paid", agentId: paidAgent, filePath };
-      }
-      // Partial name/directory — let the route resolve it against the tree.
-      const fileQuery = extractFileQuery(rawMessage);
-      if (fileQuery) {
-        return { kind: "run-paid", agentId: paidAgent, fileQuery };
-      }
+    if (filePath) {
+      return { kind: "run-paid", agentId: paidAgent, filePath };
     }
-    // No confirm yet — show the confirmation prompt, passing any query so the
-    // route can already show matching candidates.
-    const fileQuery = filePath ? undefined : extractFileQuery(rawMessage) ?? undefined;
-    return { kind: "confirm-paid", agentId: paidAgent, filePath, fileQuery };
+    const fileQuery = extractFileQuery(rawMessage);
+    if (fileQuery) {
+      // Partial name/dir — the route resolves it against the live tree, then runs.
+      return { kind: "run-paid", agentId: paidAgent, fileQuery };
+    }
+    // No file referenced — ask which file (can't analyze nothing).
+    return { kind: "confirm-paid", agentId: paidAgent, filePath: null };
   }
 
   // 3. Atlas — free + deterministic, auto-runs. Intent picks the lens.
@@ -297,28 +295,20 @@ export function formatAgentRoster(): string {
 }
 
 /**
- * The confirm-before-spend preview for a paid module. When no file is named,
- * it asks for one; when a file is present, it shows the exact confirm phrase
- * (the stateless handshake carries the path so the next turn can run it).
+ * Asks which file a paid module should analyze — shown only when the user named
+ * the agent but no file. One-step: as soon as they name a file, it runs (no
+ * separate "confirm" turn). Phrased naturally — name a file, full path or not.
  */
 export function formatPaidConfirmation(agentId: PaidAgentId, filePath: string | null): string {
   const c = getAgentConfig(agentId);
   const what = c.description.charAt(0).toLowerCase() + c.description.slice(1);
 
-  if (!filePath) {
-    return (
-      `**${c.displayName}** inspects a single file for ${what}. ` +
-      `Running it makes a paid AI call against your OpenRouter key, so I confirm before spending.\n\n` +
-      `Tell me which file to analyze, for example:\n\n` +
-      `> confirm ${agentId} apps/web/src/example.ts`
-    );
-  }
-
+  // With the one-step flow we usually only reach here when no file was named.
   return (
-    `Ready to run **${c.displayName}** on \`${filePath}\` — ${what}.\n\n` +
-    `This makes one paid AI call against your OpenRouter key. Results are cached, ` +
-    `so asking again later is free. To proceed, reply:\n\n` +
-    `> confirm ${agentId} ${filePath}`
+    `**${c.displayName}** inspects one file for ${what} (one paid AI call against your ` +
+    `OpenRouter key, cached after).\n\n` +
+    `Which file? Name it — a full path or just the name works:\n\n` +
+    `> ${agentId} ${filePath ?? "auth"}   ·   > ${agentId} backend/src/server.ts`
   );
 }
 

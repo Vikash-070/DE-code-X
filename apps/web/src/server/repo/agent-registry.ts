@@ -249,6 +249,22 @@ const GAP_INTENT_PHRASES: readonly string[] = [
   "am i missing",
   "are we missing",
   "what are we missing",
+  // Forge / planning intent → routes to the same cross-module synthesis,
+  // producing a prioritized roadmap from stored findings.
+  "run forge",
+  "use forge",
+  "ask forge",
+  "implementation plan",
+  "implementation roadmap",
+  "roadmap",
+  "what should i build",
+  "what should i build next",
+  "what should i fix",
+  "what should i fix first",
+  "what to fix first",
+  "where should i start",
+  "prioritize",
+  "prioritise",
 ];
 
 /**
