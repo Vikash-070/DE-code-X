@@ -599,14 +599,29 @@ export function formatPaidResult(
   displayName: string,
   filePath: string,
   findings: CipherFinding[],
-  fromCache: boolean
+  fromCache: boolean,
+  /**
+   * Raw AI response. Surfaced ONLY when findings is empty, so the user can see
+   * exactly what the model returned and self-diagnose silent-parse drops.
+   */
+  rawResponse?: string,
 ): string {
   const provenance = fromCache ? "from stored analysis" : "freshly analyzed";
 
   if (findings.length === 0) {
-    return (
+    const base =
       `**${displayName}** — \`${filePath}\` _(${provenance})_\n\n` +
-      `No notable findings. Nothing stood out in this file from ${displayName}'s perspective.`
+      `No notable findings were extracted from the model's response.`;
+    if (!rawResponse) return base;
+
+    // Truncate for chat readability.
+    const preview = rawResponse.length > 1_200
+      ? rawResponse.slice(0, 1_200) + "\n…(truncated)"
+      : rawResponse;
+    return (
+      base +
+      `\n\n_If you expected findings, here's what the AI provider actually returned — use this to retry with a different model or fix the prompt:_\n\n` +
+      "```\n" + preview + "\n```"
     );
   }
 

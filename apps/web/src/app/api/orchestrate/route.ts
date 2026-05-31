@@ -1580,7 +1580,7 @@ export async function POST(request: Request) {
               return;
             }
 
-            write(formatPaidResult(displayName, resolvedFilePath, paidResult.findings, paidResult.wasDeduped));
+            write(formatPaidResult(displayName, resolvedFilePath, paidResult.findings, paidResult.wasDeduped, paidResult.rawResponse));
             return;
           } catch (err) {
             const m = err instanceof Error ? err.message : "unknown error";

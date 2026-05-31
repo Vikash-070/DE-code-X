@@ -39,6 +39,8 @@ export interface GeminiCompletionOptions {
   maxTokens?:   number;
   temperature?: number;
   system?:      string;
+  /** When true, request a JSON-only response. Forces parseable structure. */
+  jsonMode?:    boolean;
 }
 
 function createClient(apiKey: string): OpenAI {
@@ -66,6 +68,7 @@ export async function runGeminiCompletion(
     maxTokens   = 2048,
     temperature = 0.2,
     system,
+    jsonMode    = false,
   } = options;
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
@@ -79,6 +82,7 @@ export async function runGeminiCompletion(
       max_tokens: maxTokens,
       temperature,
       messages,
+      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
     });
 
     const content = response.choices[0]?.message?.content;

@@ -28,6 +28,7 @@ export interface OpenRouterCompletionOptions {
   maxTokens?:   number;
   temperature?: number;
   system?:      string;
+  jsonMode?:    boolean;
 }
 
 function createClient(apiKey: string): OpenAI {
@@ -56,7 +57,8 @@ export async function runOpenRouterCompletion(
     model       = OPENROUTER_MODEL,
     maxTokens   = MAX_TOKENS,
     temperature = 0.2,
-    system
+    system,
+    jsonMode    = false,
   } = options;
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
@@ -69,7 +71,8 @@ export async function runOpenRouterCompletion(
       model,
       max_tokens: maxTokens,
       temperature,
-      messages
+      messages,
+      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
     });
 
     const content = response.choices[0]?.message?.content;

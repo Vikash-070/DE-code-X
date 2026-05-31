@@ -143,6 +143,11 @@ export interface AgentResult {
   nodeAttachments: string[];
   /** True if an existing record was updated (same filePath+branch+agentId). False if new record. */
   wasDeduped:   boolean;
+  /**
+   * Raw AI provider response — only set when findings is empty, surfaced in the
+   * chat so users can self-diagnose silent parser drops. Never persisted.
+   */
+  rawResponse?: string;
 }
 
 // ─── Module contract ──────────────────────────────────────────

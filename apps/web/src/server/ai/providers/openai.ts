@@ -16,6 +16,7 @@ export interface OpenAICompletionOptions {
   maxTokens?: number;
   temperature?: number;
   system?: string;
+  jsonMode?: boolean;
 }
 
 /**
@@ -31,7 +32,8 @@ export async function runOpenAICompletion(
     model       = "gpt-4o-mini",
     maxTokens   = 2048,
     temperature = 0.2,
-    system
+    system,
+    jsonMode    = false,
   } = options;
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
@@ -44,7 +46,8 @@ export async function runOpenAICompletion(
       model,
       max_tokens: maxTokens,
       temperature,
-      messages
+      messages,
+      ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
     });
 
     const content = response.choices[0]?.message?.content;

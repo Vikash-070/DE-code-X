@@ -65,7 +65,7 @@ async function callModuleAI(
   config:       ProviderConfig,
   systemPrompt: string,
   agentId:      AgentId
-): Promise<CipherFinding[]> {
+): Promise<{ findings: CipherFinding[]; raw: string }> {
   const userPrompt = `Analyze this file from the repository ${repoFullName}.
 
 File: ${filePath}
@@ -74,11 +74,17 @@ File: ${filePath}
 ${fileContent}
 \`\`\`
 
-Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an array. No prose, no markdown, no code fences. Each element MUST include: type, title, description, confidence, agentReasoning. If the file has ANY runtime code in scope, surface at least one observation (low/inferred is fine). Empty arrays are only for purely declarative files (types/constants/re-exports). Be specific — cite line numbers in agentReasoning.`;
+Respond with STRICT JSON in exactly this shape:
+{ "findings": [ { "type": "...", "title": "...", "description": "...", "confidence": "...", "agentReasoning": "...", "evidenceLines": { "start": N, "end": N } } ] }
+
+Rules:
+- "findings" MUST be a non-empty array when the file has ANY runtime code (I/O, queries, loops, conditionals, auth/security/perf-relevant logic). Empty array only for purely declarative files (pure types/constants/re-exports).
+- Cite line numbers in agentReasoning. Mark inferred/speculative observations honestly — partial signal beats silence.
+- No prose, no markdown, no code fences.`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  type CompletionOpts = { system: string; model?: any; temperature: number; maxTokens: number };
-  const opts: CompletionOpts = { system: systemPrompt, model: config.model, temperature: 0.1, maxTokens: ANALYZER_MAX_TOKENS };
+  type CompletionOpts = { system: string; model?: any; temperature: number; maxTokens: number; jsonMode?: boolean };
+  const opts: CompletionOpts = { system: systemPrompt, model: config.model, temperature: 0.1, maxTokens: ANALYZER_MAX_TOKENS, jsonMode: true };
 
   let raw: string;
 
@@ -100,7 +106,9 @@ Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an arra
   console.log(`[${agentId}] ai_raw_response provider=${config.provider} chars=${raw.length} preview=${raw.slice(0, 240).replace(/\n/g, " ")}`);
   const findings = parseFindings(raw, filePath, agentId);
   console.log(`[${agentId}] ai_parsed_findings count=${findings.length} file=${filePath}`);
-  return findings;
+  // Return both findings and the raw response; analyzer attaches raw to the
+  // result only when findings is empty (so users can self-diagnose).
+  return { findings, raw };
 }
 
 // ─── Finding normalization ────────────────────────────────────
@@ -295,12 +303,15 @@ export async function analyzeFileWithModule(
 
   const currentBlobSHA = treeNode.sha;
 
-  // 2. Check for fresh cached intelligence (scoped to this agentId)
+  // 2. Check for fresh cached intelligence (scoped to this agentId).
+  //    Skip the cache when the cached result was empty — likely a previous
+  //    silent-parse failure. Re-running burns one paid call but gives the user
+  //    something real instead of a stale "No findings" forever.
   const cached = await getFreshIntelligence(
     repoFullName, filePath, branch, currentBlobSHA, agentId
   );
-  if (cached) {
-    console.log(`[${agentId}] cache_hit file=${filePath} blobSHA=${currentBlobSHA.slice(0, 8)}`);
+  if (cached && cached.findings.length > 0) {
+    console.log(`[${agentId}] cache_hit file=${filePath} blobSHA=${currentBlobSHA.slice(0, 8)} findings=${cached.findings.length}`);
     return {
       agentId,
       repoFullName,
@@ -311,6 +322,9 @@ export async function analyzeFileWithModule(
       nodeAttachments: cached.nodeIds,
       wasDeduped:      true,
     };
+  }
+  if (cached) {
+    console.log(`[${agentId}] cache_skip_empty file=${filePath} blobSHA=${currentBlobSHA.slice(0, 8)} reason=re-run_for_real_result`);
   }
 
   if (dryRun) {
@@ -336,7 +350,9 @@ export async function analyzeFileWithModule(
   );
 
   // 4. Call AI
-  let findings = await callModuleAI(file.content, filePath, repoFullName, aiConfig, systemPrompt, agentId);
+  const aiResult = await callModuleAI(file.content, filePath, repoFullName, aiConfig, systemPrompt, agentId);
+  let findings = aiResult.findings;
+  const rawResponse = aiResult.raw;
 
   // 5. Post-process (strip false positives, etc.)
   if (postProcess) {
@@ -424,5 +440,7 @@ export async function analyzeFileWithModule(
     persistedAt,
     nodeAttachments: nodeIds,
     wasDeduped,
+    // Only attach raw on empty findings so users can self-diagnose.
+    ...(findings.length === 0 ? { rawResponse } : {}),
   };
 }

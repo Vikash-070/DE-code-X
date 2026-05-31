@@ -94,7 +94,7 @@ async function callCipherAI(
   filePath:    string,
   repoFullName: string,
   config:       ProviderConfig
-): Promise<CipherFinding[]> {
+): Promise<{ findings: CipherFinding[]; raw: string }> {
   const userPrompt = `Analyze this file from the repository ${repoFullName}.
 
 File: ${filePath}
@@ -103,13 +103,19 @@ File: ${filePath}
 ${fileContent}
 \`\`\`
 
-Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an array. Do not output prose, markdown, or code fences. Each array element MUST include: type, title, description, confidence, agentReasoning. Return [] if there is genuinely nothing notable to flag.`;
+Respond with STRICT JSON in exactly this shape:
+{ "findings": [ { "type": "...", "title": "...", "description": "...", "confidence": "...", "agentReasoning": "...", "evidenceLines": { "start": N, "end": N } } ] }
+
+Rules:
+- "findings" MUST be a non-empty array when the file has ANY runtime code worth describing.
+- Cite line numbers in agentReasoning.
+- No prose, no markdown, no code fences.`;
 
   let raw: string;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  type CompletionOpts = { system: string; model?: any; temperature: number; maxTokens: number };
-  const opts: CompletionOpts = { system: CIPHER_SYSTEM_PROMPT, model: config.model, temperature: 0.1, maxTokens: ANALYZER_MAX_TOKENS };
+  type CompletionOpts = { system: string; model?: any; temperature: number; maxTokens: number; jsonMode?: boolean };
+  const opts: CompletionOpts = { system: CIPHER_SYSTEM_PROMPT, model: config.model, temperature: 0.1, maxTokens: ANALYZER_MAX_TOKENS, jsonMode: true };
 
   if (config.provider === "anthropic") {
     const { runAnthropicCompletion } = await import("@/server/ai/providers/anthropic");
@@ -125,7 +131,10 @@ Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an arra
     raw = await runOpenRouterCompletion(config.apiKey, userPrompt, opts);
   }
 
-  return parseFindings(raw, filePath);
+  console.log(`[cipher] ai_raw_response provider=${config.provider} chars=${raw.length} preview=${raw.slice(0, 240).replace(/\n/g, " ")}`);
+  const findings = parseFindings(raw, filePath);
+  console.log(`[cipher] ai_parsed_findings count=${findings.length} file=${filePath}`);
+  return { findings, raw };
 }
 
 // ─── Finding normalization ────────────────────────────────────
@@ -316,10 +325,11 @@ export async function analyzeFileWithCipher(
 
   const currentBlobSHA = treeNode.sha;
 
-  // 2. Check for fresh cached intelligence (scoped to "cipher" — each module has its own cache)
+  // 2. Check for fresh cached intelligence (scoped to "cipher").
+  //    Skip empty caches — likely a previous silent-parse failure. Re-run instead.
   const cached = await getFreshIntelligence(repoFullName, filePath, branch, currentBlobSHA, "cipher");
-  if (cached) {
-    console.log(`[cipher] cache_hit file=${filePath} blobSHA=${currentBlobSHA.slice(0, 8)}`);
+  if (cached && cached.findings.length > 0) {
+    console.log(`[cipher] cache_hit file=${filePath} blobSHA=${currentBlobSHA.slice(0, 8)} findings=${cached.findings.length}`);
     return {
       agentId:        "cipher",
       repoFullName,
@@ -330,6 +340,9 @@ export async function analyzeFileWithCipher(
       nodeAttachments: cached.nodeIds,
       wasDeduped:     true,
     };
+  }
+  if (cached) {
+    console.log(`[cipher] cache_skip_empty file=${filePath} blobSHA=${currentBlobSHA.slice(0, 8)} reason=re-run_for_real_result`);
   }
 
   if (dryRun) {
@@ -355,7 +368,7 @@ export async function analyzeFileWithCipher(
   );
 
   // 4. Call AI
-  const findings = await callCipherAI(file.content, filePath, repoFullName, aiConfig);
+  const { findings, raw: rawResponse } = await callCipherAI(file.content, filePath, repoFullName, aiConfig);
 
   // 5. Derive node IDs
   const domainMap = buildDomainMap(tree);
@@ -439,5 +452,6 @@ export async function analyzeFileWithCipher(
     persistedAt,
     nodeAttachments: nodeIds,
     wasDeduped,
+    ...(findings.length === 0 ? { rawResponse } : {}),
   };
 }
