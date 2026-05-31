@@ -74,7 +74,7 @@ File: ${filePath}
 ${fileContent}
 \`\`\`
 
-Return a JSON array of findings. Return [] if nothing notable.`;
+Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an array. Do not output prose, markdown, or code fences. Each array element MUST include: type, title, description, confidence, agentReasoning. Return [] if there is genuinely nothing notable to flag.`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   type CompletionOpts = { system: string; model?: any; temperature: number; maxTokens: number };
@@ -102,42 +102,92 @@ Return a JSON array of findings. Return [] if nothing notable.`;
 // ─── Finding normalization ────────────────────────────────────
 
 function parseFindings(raw: string, filePath: string, agentId: AgentId): CipherFinding[] {
+  // Strip code fences (Gemini wraps with ```json … ``` often).
   const stripped = raw
-    .replace(/^```(?:json)?\s*/m, "")
-    .replace(/\s*```\s*$/m, "")
+    .replace(/```(?:json|jsonc)?/gi, "")
+    .replace(/```/g, "")
     .trim();
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(stripped);
   } catch {
-    const match = stripped.match(/\[[\s\S]*\]/);
-    if (match) {
-      try { parsed = JSON.parse(match[0]); } catch { return []; }
+    // Last-ditch: pull the outermost JSON array or object from the text.
+    const arrMatch = stripped.match(/\[[\s\S]*\]/);
+    const objMatch = stripped.match(/\{[\s\S]*\}/);
+    const candidate = arrMatch?.[0] ?? objMatch?.[0];
+    if (candidate) {
+      try { parsed = JSON.parse(candidate); } catch {
+        console.warn(`[${agentId}] parse_failed file=${filePath} raw_length=${raw.length} preview=${raw.slice(0, 180)}`);
+        return [];
+      }
     } else {
-      console.warn(`[${agentId}] parse_failed file=${filePath} raw_length=${raw.length}`);
+      console.warn(`[${agentId}] parse_failed file=${filePath} raw_length=${raw.length} preview=${raw.slice(0, 180)}`);
       return [];
     }
   }
 
-  if (!Array.isArray(parsed)) return [];
+  // Unwrap common object wrappers — Gemini frequently returns
+  // { findings: [...] } / { results: [...] } / { items: [...] } / { analysis: [...] }.
+  const list: unknown[] = Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === "object")
+      ? (() => {
+          const o = parsed as Record<string, unknown>;
+          for (const k of ["findings", "results", "items", "analysis", "issues", "data"]) {
+            if (Array.isArray(o[k])) return o[k] as unknown[];
+          }
+          // Single-finding object → wrap as array.
+          if (typeof o.title === "string" || typeof o.description === "string") return [o];
+          return [];
+        })()
+      : [];
 
-  return parsed
-    .filter(isValidFinding)
-    .map(f => normalizeFinding(f, filePath));
+  const accepted: CipherFinding[] = [];
+  let dropped = 0;
+  for (const item of list) {
+    const normalized = tryNormalize(item, filePath);
+    if (normalized) accepted.push(normalized);
+    else dropped++;
+  }
+  if (dropped > 0) {
+    console.warn(`[${agentId}] findings_dropped count=${dropped} kept=${accepted.length} file=${filePath}`);
+  }
+  return accepted;
 }
 
-function isValidFinding(f: unknown): f is Record<string, unknown> {
-  if (!f || typeof f !== "object") return false;
-  const obj = f as Record<string, unknown>;
-  return (
-    typeof obj.type         === "string" &&
-    typeof obj.title        === "string" &&
-    typeof obj.description  === "string" &&
-    typeof obj.confidence   === "string" &&
-    typeof obj.agentReasoning === "string" &&
-    obj.agentReasoning.length > 10
-  );
+/**
+ * Normalize a single AI-returned finding into CipherFinding, accepting common
+ * field-name aliases so Gemini/Claude/GPT all parse uniformly. Returns null when
+ * the item has no usable title/description at all.
+ */
+function tryNormalize(item: unknown, filePath: string): CipherFinding | null {
+  if (!item || typeof item !== "object") return null;
+  const o = item as Record<string, unknown>;
+
+  // Aliases for each required field — the model varies by provider/version.
+  const pickStr = (...keys: string[]): string => {
+    for (const k of keys) {
+      const v = o[k];
+      if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    }
+    return "";
+  };
+
+  const title       = pickStr("title", "name", "summary", "heading");
+  const description = pickStr("description", "details", "detail", "explanation", "body", "summary");
+  // Need SOMETHING to display — without title and description, drop.
+  if (!title && !description) return null;
+
+  // agentReasoning may be missing — fall back to description.
+  const agentReasoning = pickStr("agentReasoning", "reasoning", "rationale", "why", "evidence") || description;
+
+  return normalizeFinding({
+    ...o,
+    title:          title || description.slice(0, 80),
+    description:    description || title,
+    agentReasoning,
+  }, filePath);
 }
 
 function normalizeFinding(
