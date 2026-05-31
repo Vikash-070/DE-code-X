@@ -78,6 +78,7 @@ import {
   formatPaidConfirmation,
   formatAtlasResult,
   formatPaidResult,
+  extractFileQuery,
 } from "@/server/repo/agent-orchestration";
 import { sameOrigin }               from "@/server/security/guards";
 import { analyzeRepoWithAtlas }     from "@/server/repo/atlas-analyzer";
@@ -898,6 +899,65 @@ async function buildSystemNameRetrieval(
   return { files, treeQuery: termsUsed.join(" ") };
 }
 
+// ─── Fuzzy file resolution (Increment C UX) ──────────────
+//
+// When the user names a file without a full path or extension (e.g. "middleware",
+// "auth", "backend/src/middleware"), search the repo tree and return the best
+// candidates. The caller decides what to do with 0 / 1 / many results.
+
+interface FileCandidate { path: string; name: string; }
+
+type ResolvedQuery =
+  | { kind: "exact";      file: FileCandidate }
+  | { kind: "candidates"; files: FileCandidate[] }
+  | { kind: "none";       query: string };
+
+function resolveFileQuery(
+  query: string,
+  tree: RepoTree,
+  agentId: string
+): { kind: "exact"; file: FileCandidate }
+ | { kind: "candidates"; files: FileCandidate[] }
+ | { kind: "none"; query: string } {
+  // searchTree ranks by keyword relevance; we want up to 8 candidates to filter.
+  const raw = searchTree(tree, query, 8);
+
+  // Only keep real files (blobs), not directories.
+  const files: FileCandidate[] = raw
+    .filter(n => n.type === "blob")
+    .map(n => ({ path: n.path, name: n.path.split("/").pop() ?? n.path }))
+    .slice(0, 5);
+
+  if (files.length === 0) return { kind: "none", query };
+  if (files.length === 1) return { kind: "exact", file: files[0]! };
+  return { kind: "candidates", files };
+}
+
+function formatFileQueryResponse(
+  result: ReturnType<typeof resolveFileQuery>,
+  agentId: string,
+  displayName: string
+): string {
+  if (result.kind === "none") {
+    return (
+      `I searched the repo tree for **"${result.query}"** but couldn't find a matching file.\n\n` +
+      `Try being more specific, for example:\n> confirm ${agentId} backend/src/middleware/auth.ts`
+    );
+  }
+  if (result.kind === "candidates") {
+    const list = result.files
+      .map((f, i) => `${i + 1}. \`${f.path}\``)
+      .join("\n");
+    const confirm = `confirm ${agentId} ${result.files[0]!.path}`;
+    return (
+      `I found **${result.files.length} files** matching that name. Which one?\n\n${list}\n\n` +
+      `Reply with the number or copy the confirm phrase, e.g.:\n> ${confirm}`
+    );
+  }
+  // exact — caller uses result.file.path directly, this branch not reached here
+  return "";
+}
+
 // ─── Route handler ────────────────────────────────────────
 
 export async function POST(request: Request) {
@@ -1256,13 +1316,8 @@ export async function POST(request: Request) {
               return;
             }
 
-            if (orchestration.kind === "confirm-paid") {
-              console.log(`[orchestrate] orchestration=confirm-paid agent=${orchestration.agentId} hasPath=${!!orchestration.filePath}`);
-              write(formatPaidConfirmation(orchestration.agentId, orchestration.filePath));
-              return;
-            }
-
             // run-atlas / run-paid both execute a module → need a GitHub token.
+            // Fetch it early so confirm-paid with a fileQuery can search the tree.
             const [oOwner, oRepo] = repositoryContext.fullName.split("/");
             const oBranch = repositoryContext.defaultBranch ?? "main";
             const orchToken = await clerkClient()
@@ -1272,6 +1327,28 @@ export async function POST(request: Request) {
 
             if (!orchToken) {
               write("I need GitHub access to analyze this repository. Connect GitHub in Settings, then ask again.");
+              return;
+            }
+
+            if (orchestration.kind === "confirm-paid") {
+              const dispName = orchestration.agentId.charAt(0).toUpperCase() + orchestration.agentId.slice(1);
+              // If a fileQuery is present but no exact path, search the tree and
+              // embed the matches in the confirmation so the user can just pick.
+              if (!orchestration.filePath && orchestration.fileQuery) {
+                const tree = await fetchRepoTree(oOwner, oRepo, oBranch, orchToken).catch(() => null);
+                if (tree) {
+                  const resolved = resolveFileQuery(orchestration.fileQuery, tree, orchestration.agentId);
+                  if (resolved.kind === "exact") {
+                    // One perfect match — jump straight to the confirm phrase.
+                    write(formatPaidConfirmation(orchestration.agentId, resolved.file.path));
+                  } else {
+                    write(formatFileQueryResponse(resolved, orchestration.agentId, dispName));
+                  }
+                  return;
+                }
+              }
+              console.log(`[orchestrate] orchestration=confirm-paid agent=${orchestration.agentId} hasPath=${!!orchestration.filePath}`);
+              write(formatPaidConfirmation(orchestration.agentId, orchestration.filePath ?? null));
               return;
             }
 
@@ -1326,13 +1403,33 @@ export async function POST(request: Request) {
             }
 
             const displayName = orchestration.agentId.charAt(0).toUpperCase() + orchestration.agentId.slice(1);
-            console.log(`[orchestrate] orchestration=run-paid agent=${orchestration.agentId} file=${orchestration.filePath}`);
-            write(`Running ${displayName} on \`${orchestration.filePath}\`…\n\n`);
+
+            // Resolve a fileQuery to an exact path before dispatching.
+            let resolvedFilePath: string | undefined = orchestration.filePath;
+            if (!resolvedFilePath && orchestration.fileQuery) {
+              const tree = await fetchRepoTree(oOwner, oRepo, oBranch, orchToken).catch(() => null);
+              if (tree) {
+                const resolved = resolveFileQuery(orchestration.fileQuery, tree, orchestration.agentId);
+                if (resolved.kind === "exact") {
+                  resolvedFilePath = resolved.file.path;
+                } else {
+                  write(formatFileQueryResponse(resolved, orchestration.agentId, displayName));
+                  return;
+                }
+              }
+            }
+            if (!resolvedFilePath) {
+              write(`Tell me which file to analyze, for example:\n> confirm ${orchestration.agentId} src/app/api/route.ts`);
+              return;
+            }
+
+            console.log(`[orchestrate] orchestration=run-paid agent=${orchestration.agentId} file=${resolvedFilePath}`);
+            write(`Running ${displayName} on \`${resolvedFilePath}\`…\n\n`);
 
             const dispatch = {
               owner:       oOwner,
               repo:        oRepo,
-              filePath:    orchestration.filePath,
+              filePath:    resolvedFilePath,
               branch:      oBranch,
               githubToken: orchToken,
               aiConfig: {
@@ -1351,11 +1448,11 @@ export async function POST(request: Request) {
             } catch (err) {
               const m = err instanceof Error ? err.message : "unknown error";
               console.log(`[orchestrate] orchestration_paid_error agent=${orchestration.agentId} err=${m}`);
-              write(`I couldn't analyze \`${orchestration.filePath}\` with ${displayName}: ${m}`);
+              write(`I couldn't analyze \`${resolvedFilePath}\` with ${displayName}: ${m}`);
               return;
             }
 
-            write(formatPaidResult(displayName, orchestration.filePath, paidResult.findings, paidResult.wasDeduped));
+            write(formatPaidResult(displayName, resolvedFilePath, paidResult.findings, paidResult.wasDeduped));
             return;
           } catch (err) {
             const m = err instanceof Error ? err.message : "unknown error";

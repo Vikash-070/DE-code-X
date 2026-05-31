@@ -178,8 +178,9 @@ function deriveActivity(message: string): AgentActivity {
       case "confirm-paid":
         return { agent: null, label: "Preparing confirmation" };
       case "run-paid": {
-        const base = action.filePath.split("/").pop() ?? action.filePath;
-        return { agent: action.agentId, label: `Analyzing ${base}`, file: action.filePath };
+        const fp   = action.filePath ?? action.fileQuery ?? "";
+        const base = fp.split("/").pop() ?? fp;
+        return { agent: action.agentId, label: `Analyzing ${base || "file"}`, file: fp || null };
       }
     }
   }

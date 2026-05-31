@@ -59,8 +59,14 @@ export type AtlasLens = "topology" | "architecture" | "capability" | "graph";
 export type OrchestrationAction =
   | { kind: "discover" }
   | { kind: "run-atlas"; lens: AtlasLens; refresh: boolean }
-  | { kind: "run-paid"; agentId: PaidAgentId; filePath: string }
-  | { kind: "confirm-paid"; agentId: PaidAgentId; filePath: string | null };
+  /**
+   * run-paid: filePath is a resolved, extension-bearing path.
+   * fileQuery is set when the user gave a partial name/directory instead of a
+   * full path — the route resolves it against the live tree before dispatching.
+   */
+  | { kind: "run-paid";     agentId: PaidAgentId; filePath: string;       fileQuery?: never }
+  | { kind: "run-paid";     agentId: PaidAgentId; filePath?: never;       fileQuery: string }
+  | { kind: "confirm-paid"; agentId: PaidAgentId; filePath: string | null; fileQuery?: string };
 
 // ─── Intent patterns ──────────────────────────────────────────
 
@@ -172,10 +178,21 @@ export function detectOrchestrationAction(rawMessage: string): OrchestrationActi
   const paidAgent = detectPaidAgent(msg);
   if (paidAgent) {
     const filePath = extractFilePath(rawMessage);
-    if (CONFIRM_RE.test(msg) && filePath) {
-      return { kind: "run-paid", agentId: paidAgent, filePath };
+    if (CONFIRM_RE.test(msg)) {
+      if (filePath) {
+        // Full resolved path — run immediately.
+        return { kind: "run-paid", agentId: paidAgent, filePath };
+      }
+      // Partial name/directory — let the route resolve it against the tree.
+      const fileQuery = extractFileQuery(rawMessage);
+      if (fileQuery) {
+        return { kind: "run-paid", agentId: paidAgent, fileQuery };
+      }
     }
-    return { kind: "confirm-paid", agentId: paidAgent, filePath };
+    // No confirm yet — show the confirmation prompt, passing any query so the
+    // route can already show matching candidates.
+    const fileQuery = filePath ? undefined : extractFileQuery(rawMessage) ?? undefined;
+    return { kind: "confirm-paid", agentId: paidAgent, filePath, fileQuery };
   }
 
   // 3. Atlas — free + deterministic, auto-runs. Intent picks the lens.
@@ -219,6 +236,37 @@ export function extractFilePath(raw: string): string | null {
   if (withSlash) return withSlash[0];
   const bare = raw.match(/\b[\w-]+\.(?:tsx?|jsx?|mjs|cjs|py|go|rb|rs|java|kt|sql|json|ya?ml|md)\b/);
   return bare ? bare[0] : null;
+}
+
+/**
+ * Extract a fuzzy file query from a paid-agent message when no full path is
+ * present. Captures: bare names without extensions (e.g. "middleware", "auth"),
+ * partial paths with slashes but no extension (e.g. "backend/src/middleware"),
+ * and camelCase/PascalCase identifiers. Returns null when nothing useful found.
+ *
+ * Used as a fallback when extractFilePath() returns null — the route resolves
+ * this query against the live repo tree so users never need full exact paths.
+ */
+export function extractFileQuery(raw: string): string | null {
+  // Already has a full path with extension — extractFilePath handles it.
+  if (extractFilePath(raw)) return null;
+
+  // Partial path with slash(es) but no extension: "backend/src/middleware"
+  const withSlash = raw.match(/\b[\w][\w./-]*\/[\w.-]+\b/);
+  if (withSlash) return withSlash[0];
+
+  // Strip the agent verb + agent name to isolate the subject token.
+  // e.g. "use cipher on authMiddleware" → "authMiddleware"
+  //      "confirm sentinel auth"        → "auth"
+  const stripped = raw
+    .replace(/\b(confirm|use|run|ask|analyze|analyse|with|invoke|call)\b/gi, "")
+    .replace(/\b(cipher|sentinel|pulse|forge|atlas)\b/gi, "")
+    .replace(/\b(on|the|a|an|file|for|in|of)\b/gi, "")
+    .trim();
+
+  // Accept any remaining word of 3+ chars (ignores filler words already stripped).
+  const token = stripped.match(/\b[\w][\w.-]{2,}\b/);
+  return token ? token[0] : null;
 }
 
 // ─── Formatters (pure, V# voice) ──────────────────────────────
