@@ -159,7 +159,8 @@ export function WorkspaceHomePage() {
 
   // Read prefill from URL (?prefill=...) — set by Architecture Workspace "Ask V#" button.
   const searchParams   = useSearchParams();
-  const prefillMessage = searchParams.get("prefill") ?? undefined;
+  const prefillMessage = searchParams.get("prefill")  ?? undefined;
+  const sessionId      = searchParams.get("session")  ?? undefined;
 
   function handleRepoConfirm(repo: GitHubRepositorySummary) {
     confirmRepository(repo);
@@ -202,6 +203,7 @@ export function WorkspaceHomePage() {
             onCipherStateChange={setCipherState}
             onActivityChange={setActivity}
             prefillMessage={prefillMessage}
+            sessionId={sessionId}
           />
         </div>
 

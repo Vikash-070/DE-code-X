@@ -198,6 +198,7 @@ export function WorkspaceSession({
   onCipherStateChange,
   onActivityChange,
   prefillMessage,
+  sessionId,
 }: {
   onOrchestrationChange?: (orchestrating: boolean) => void;
   onCipherStateChange?:   (state: CipherAgentState) => void;
@@ -205,12 +206,27 @@ export function WorkspaceSession({
   onActivityChange?:      (activity: AgentActivity) => void;
   /** Pre-fills the chat input. Passed from Architecture Workspace "Ask V#" button. */
   prefillMessage?: string;
+  /** Session ID to restore on mount (from ?session= URL param). */
+  sessionId?: string;
 } = {}) {
   const { activeRepository } = useActiveRepository();
 
   const [messages, setMessages]   = useState<SessionMessage[]>(() =>
     activeRepository ? [buildOpeningBriefing(activeRepository)] : []
   );
+
+  // Restore a previous session's messages on mount.
+  useEffect(() => {
+    if (!sessionId) return;
+    fetch(`/api/sessions/${sessionId}`)
+      .then((r) => r.json() as Promise<{ session?: { messages?: SessionMessage[] } }>)
+      .then((data) => {
+        const saved = data.session?.messages;
+        if (saved && saved.length > 0) setMessages(saved);
+      })
+      .catch(() => {}); // silent — fresh session if load fails
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
   const [isOrchestrating,  setIsOrchestrating]  = useState(false);
   const [isReferenceMode,  setIsReferenceMode]   = useState(false);
   const [cipherState,      setCipherStateLocal]  = useState<CipherAgentState>(CIPHER_IDLE);
