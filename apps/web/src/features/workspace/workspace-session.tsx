@@ -391,6 +391,17 @@ export function WorkspaceSession({
       const filePath = detectFilePath(aMsg.content);
       if (!filePath) return;
 
+      // Don't re-trigger Cipher when the previous user turn was a paid-agent
+      // dispatch (e.g. user ran Pulse on a file — V#'s confirmation contains
+      // the file path, but we shouldn't auto-spend a Cipher call on top).
+      const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+      if (lastUserMsg && lastUserMsg.role === "user") {
+        const prevAction = detectOrchestrationAction(lastUserMsg.content);
+        if (prevAction?.kind === "run-paid" || prevAction?.kind === "confirm-paid") {
+          return;
+        }
+      }
+
       console.log(`[cipher] vhash_response_file path=${filePath}`);
 
       // Short delay so V# render settles before Cipher panel activates
@@ -407,8 +418,15 @@ export function WorkspaceSession({
       if (!text.trim() || isOrchestrating || !activeRepository) return;
 
       // ── File path in user message → trigger Cipher ──────
+      // Skip Cipher auto-trigger when the user explicitly invoked a DIFFERENT
+      // paid agent (Sentinel/Pulse) — otherwise both Cipher AND the named agent
+      // would run, and the Agent Team panel would show Cipher instead of the
+      // module the user actually asked for.
+      const orchestrationPreview = detectOrchestrationAction(text.trim());
+      const userInvokedPaidAgent = orchestrationPreview?.kind === "run-paid"
+        || orchestrationPreview?.kind === "confirm-paid";
       const detectedFile = detectFilePath(text.trim());
-      if (detectedFile) {
+      if (detectedFile && !userInvokedPaidAgent) {
         console.log(`[cipher] user_msg_file path=${detectedFile}`);
         void triggerCipher(detectedFile);
       }

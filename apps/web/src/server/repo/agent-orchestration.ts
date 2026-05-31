@@ -217,9 +217,17 @@ function detectAtlasLens(lowerMsg: string): AtlasLens {
 
 /** Find a named paid module in the message, gated on a control verb. */
 function detectPaidAgent(lowerMsg: string): PaidAgentId | null {
-  if (!PAID_VERB_RE.test(lowerMsg)) return null;
+  const trimmed = lowerMsg.trim();
+  // Two intent shapes are accepted:
+  //   1. Verb + agent: "use pulse …", "run sentinel …", "confirm cipher …"
+  //   2. Agent first: "pulse <file>", "sentinel auth" — the agent name as the
+  //      LEAD token is itself a clear directive; no verb required. Prose like
+  //      "the pulse of the feed" doesn't lead with "pulse", so it's still safe.
+  const verbOK = PAID_VERB_RE.test(trimmed);
   for (const agent of PAID_AGENTS) {
-    if (new RegExp(`\\b${agent}\\b`).test(lowerMsg)) return agent;
+    const namedAtStart = new RegExp(`^${agent}\\b`).test(trimmed);
+    const namedAnywhere = new RegExp(`\\b${agent}\\b`).test(trimmed);
+    if (namedAtStart || (verbOK && namedAnywhere)) return agent;
   }
   return null;
 }
