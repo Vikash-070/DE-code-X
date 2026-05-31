@@ -253,6 +253,23 @@ export function extractFilePath(raw: string): string | null {
  * Used as a fallback when extractFilePath() returns null — the route resolves
  * this query against the live repo tree so users never need full exact paths.
  */
+/** Common English stop words — never valid as a file query. */
+const STOP_WORDS = new Set([
+  "the","a","an","and","or","but","of","in","on","at","to","for","by","with",
+  "from","is","are","was","were","be","been","being","this","that","these","those",
+  "it","its","my","your","our","their","his","her","i","me","we","us","you","they",
+  "do","does","did","done","doing","go","goes","went","get","gets","got",
+  "want","wants","wanted","need","needs","needed","like","likes","liked",
+  "read","reads","reading","see","sees","seen","show","shows","showed","showing",
+  "check","checks","tell","tells","look","looks","find","finds","found",
+  "give","gives","gave","make","makes","made","let","lets","know","knows",
+  "what","why","how","when","where","which","who","whom",
+  "can","could","should","would","will","may","might","must","shall",
+  "have","has","had","having",
+  "performance","perf","speed","slow","fast","quality","security","secure",
+  "file","files","code","function","method","class","module","feature",
+]);
+
 export function extractFileQuery(raw: string): string | null {
   // Already has a full path with extension — extractFilePath handles it.
   if (extractFilePath(raw)) return null;
@@ -261,18 +278,33 @@ export function extractFileQuery(raw: string): string | null {
   const withSlash = raw.match(/\b[\w][\w./-]*\/[\w.-]+\b/);
   if (withSlash) return withSlash[0];
 
-  // Strip the agent verb + agent name to isolate the subject token.
-  // e.g. "use cipher on authMiddleware" → "authMiddleware"
-  //      "confirm sentinel auth"        → "auth"
-  const stripped = raw
-    .replace(/\b(confirm|use|run|ask|analyze|analyse|with|invoke|call)\b/gi, "")
-    .replace(/\b(cipher|sentinel|pulse|forge|atlas)\b/gi, "")
-    .replace(/\b(on|the|a|an|file|for|in|of)\b/gi, "")
-    .trim();
+  const tokens = raw.split(/\s+/);
+  const candidates: { token: string; score: number }[] = [];
 
-  // Accept any remaining word of 3+ chars (ignores filler words already stripped).
-  const token = stripped.match(/\b[\w][\w.-]{2,}\b/);
-  return token ? token[0] : null;
+  for (const rawTok of tokens) {
+    const tok = rawTok.replace(/[^\w.-]/g, "");
+    if (tok.length < 3) continue;
+    const lower = tok.toLowerCase();
+    if (STOP_WORDS.has(lower)) continue;
+    if (/^(cipher|sentinel|pulse|forge|atlas|confirm|use|run|ask|analy[sz]e|with|invoke|call)$/i.test(tok)) continue;
+
+    // Score tokens by how "identifier-like" they look — real file/symbol names
+    // score higher than incidental nouns, so "authMiddleware" beats "feed" when
+    // both are present.
+    let score = 1;
+    if (/^[A-Z][a-zA-Z]+/.test(tok))         score += 5; // PascalCase: AuthController
+    if (/[a-z][A-Z]/.test(tok))              score += 5; // camelCase: feedAlgorithm
+    if (/[-_]/.test(tok))                    score += 4; // kebab/snake
+    if (/\d/.test(tok))                      score += 1; // contains digit
+    if (lower.length >= 6)                   score += 1; // longer words more distinctive
+    candidates.push({ token: tok, score });
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  // Require the top candidate to have at least a "distinctive" score (>=2) so
+  // sentences full of stop words like "i want to" don't match.
+  return candidates[0]!.score >= 2 ? candidates[0]!.token : null;
 }
 
 // ─── Formatters (pure, V# voice) ──────────────────────────────

@@ -74,7 +74,7 @@ File: ${filePath}
 ${fileContent}
 \`\`\`
 
-Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an array. Do not output prose, markdown, or code fences. Each array element MUST include: type, title, description, confidence, agentReasoning. Return [] if there is genuinely nothing notable to flag.`;
+Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an array. No prose, no markdown, no code fences. Each element MUST include: type, title, description, confidence, agentReasoning. If the file has ANY runtime code in scope, surface at least one observation (low/inferred is fine). Empty arrays are only for purely declarative files (types/constants/re-exports). Be specific — cite line numbers in agentReasoning.`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   type CompletionOpts = { system: string; model?: any; temperature: number; maxTokens: number };
@@ -96,7 +96,11 @@ Return STRICTLY a JSON ARRAY at the top level — NOT an object wrapping an arra
     raw = await runOpenRouterCompletion(config.apiKey, userPrompt, opts);
   }
 
-  return parseFindings(raw, filePath, agentId);
+  // Log the raw AI response so silent "no findings" issues are diagnosable.
+  console.log(`[${agentId}] ai_raw_response provider=${config.provider} chars=${raw.length} preview=${raw.slice(0, 240).replace(/\n/g, " ")}`);
+  const findings = parseFindings(raw, filePath, agentId);
+  console.log(`[${agentId}] ai_parsed_findings count=${findings.length} file=${filePath}`);
+  return findings;
 }
 
 // ─── Finding normalization ────────────────────────────────────
