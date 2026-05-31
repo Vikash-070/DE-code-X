@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useActiveRepository }             from "@/contexts/repository-context";
+import { useSessionPersistence }           from "@/hooks/use-session-persistence";
 import { detectGapIntent }                 from "@/server/repo/agent-registry";
 import { detectOrchestrationAction }        from "@/server/repo/agent-orchestration";
 import type { GitHubRepositorySummary }    from "@/services/github/types";
@@ -215,6 +216,9 @@ export function WorkspaceSession({
   const [cipherState,      setCipherStateLocal]  = useState<CipherAgentState>(CIPHER_IDLE);
   // True after a capability-gap question completes — drives follow-up chips.
   const [gapFollowUpsActive, setGapFollowUpsActive] = useState(false);
+
+  // Auto-save chat after each completed turn.
+  useSessionPersistence({ messages, activeRepository, isOrchestrating });
 
   const mountedRef             = useRef(true);
   const readerRef              = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);

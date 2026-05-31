@@ -15,6 +15,7 @@ model User {
   avatarUrl    String?
   projects     Project[]
   providerKeys UserProviderKey[]
+  chatSessions ChatSession[]
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
 
@@ -166,6 +167,32 @@ model FileEmbedding {
   @@unique([repoFullName, filePath, branch])
   @@index([repoFullName, branch])
   @@map("file_embeddings")
+}
+
+/// V# workspace chat session — one per user per repository (latest wins).
+/// Messages are stored as JSONB so the full SessionMessage[] shape is preserved
+/// without a separate table. Capped at 200 messages per session (oldest trimmed).
+model ChatSession {
+  id           String        @id @default(cuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// GitHub full name, e.g. "owner/repo"
+  repoFullName String
+  repoName     String
+  repoOwner    String
+  /// Last user message text — shown in the sessions list as a preview
+  lastMessage  String        @default("")
+  /// Total messages ever saved (monotone counter)
+  messageCount Int           @default(0)
+  /// SessionMessage[] stored as JSONB
+  messages     Json          @default("[]")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  /// One active session per user per repo — new messages upsert this row
+  @@unique([userId, repoFullName])
+  @@index([userId])
+  @@map("chat_sessions")
 }
 
 /// Latest known file tree snapshot for a repo+branch.
