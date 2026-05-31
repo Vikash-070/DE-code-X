@@ -224,6 +224,107 @@ async function* streamOpenRouter(
   }
 }
 
+// ─── Unified provider streamer ────────────────────────────
+// Dispatches to the right SDK based on the user's saved provider. OpenAI,
+// OpenRouter, and Gemini all use the OpenAI SDK with different base URLs;
+// Anthropic uses the Anthropic SDK. All four stream "delta text" the same way
+// to the caller, so the surrounding two-stage timeout logic is unchanged.
+
+type StreamProvider = "openrouter" | "openai" | "gemini" | "anthropic";
+
+async function* streamFromProvider(
+  provider: StreamProvider,
+  apiKey:   string,
+  model:    string | null | undefined,
+  system:   string,
+  messages: ConversationTurn[],
+  signal:   AbortSignal
+): AsyncGenerator<string> {
+  if (provider === "openrouter") {
+    yield* streamOpenRouter(apiKey, system, messages, signal);
+    return;
+  }
+
+  // ── OpenAI-compatible: openai / gemini ────────────────
+  if (provider === "openai" || provider === "gemini") {
+    const baseURL =
+      provider === "gemini"
+        ? "https://generativelanguage.googleapis.com/v1beta/openai"
+        : undefined; // default = api.openai.com
+    const defaultModel = provider === "gemini" ? "gemini-2.5-flash" : "gpt-4o-mini";
+    const client = new OpenAI({
+      apiKey,
+      ...(baseURL ? { baseURL } : {}),
+      defaultHeaders: { "HTTP-Referer": "https://decode-x.ai", "X-Title": "DE-code X" },
+    });
+    const useModel = model && model.trim().length > 0 ? model : defaultModel;
+    console.log(`[orchestrate] ${provider}_request_started model=${useModel} messages=${messages.length}`);
+    let stream;
+    try {
+      stream = await client.chat.completions.create({
+        model:      useModel,
+        max_tokens: MAX_TOKENS,
+        stream:     true,
+        messages:   [
+          { role: "system", content: system },
+          ...messages.map((m) => ({ role: m.role, content: m.content })),
+        ],
+      }, { signal });
+    } catch (err) {
+      if (signal.aborted) return;
+      if (err instanceof OpenAI.APIError) {
+        if (err.status === 401 || err.status === 403) {
+          throw new Error(`${provider} authentication failed. Check your API key in Settings → AI Providers.`);
+        }
+        if (err.status === 402) {
+          throw new Error(`${provider} account is out of credits or quota. Check your billing/quota and try again.`);
+        }
+        if (err.status === 429) {
+          throw new Error(`${provider} rate limit hit. Wait a moment and try again.`);
+        }
+        throw new Error(`${provider} request failed (${err.status}): ${err.message}`);
+      }
+      throw err;
+    }
+    let firstToken = true;
+    for await (const chunk of stream) {
+      if (signal.aborted) break;
+      const text = chunk.choices[0]?.delta?.content ?? "";
+      if (text) {
+        if (firstToken) {
+          console.log(`[orchestrate] first_token_received`);
+          firstToken = false;
+        }
+        yield text;
+      }
+    }
+    return;
+  }
+
+  // ── Anthropic (different SDK shape) ─────────────────
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const client = new Anthropic({ apiKey });
+  const useModel = model && model.trim().length > 0 ? model : "claude-haiku-3-5";
+  console.log(`[orchestrate] anthropic_request_started model=${useModel} messages=${messages.length}`);
+  const stream = await client.messages.stream({
+    model:      useModel,
+    max_tokens: MAX_TOKENS,
+    system,
+    messages:   messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+  });
+  let firstToken = true;
+  for await (const event of stream) {
+    if (signal.aborted) break;
+    if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+      if (firstToken) {
+        console.log(`[orchestrate] first_token_received`);
+        firstToken = false;
+      }
+      yield event.delta.text;
+    }
+  }
+}
+
 // ─── Mock streaming fallback ──────────────────────────────
 // Used when no OpenRouter key is configured.
 // Simulates realistic streaming latency to validate the UI pipeline.
@@ -1082,14 +1183,15 @@ export async function POST(request: Request) {
           .then(tokens => tokens.data[0]?.token)
           .catch(() => undefined);
 
+  // Look up the user's most-recently-used active key, ANY provider. Earlier
+  // versions hard-coded provider="openrouter" which broke Gemini/OpenAI/
+  // Anthropic users even after they saved a key. Dispatch picks the adapter
+  // off `keyRecord.provider` (see below).
   const keyPromise = prisma.userProviderKey
     .findFirst({
-      where: {
-        user:      { clerkId },
-        provider:  "openrouter",
-        isActive:  true
-      },
-      select: { encryptedKey: true, model: true }
+      where:   { user: { clerkId }, isActive: true },
+      orderBy: { lastUsedAt: "desc" },
+      select:  { encryptedKey: true, model: true, provider: true },
     })
     .catch(() => null);
 
@@ -1412,24 +1514,21 @@ export async function POST(request: Request) {
               return;
             }
 
-            // run-paid — confirmed by the user, bounded to one file.
-            // Requires a decrypted OpenRouter key (await the in-flight lookup).
+            // run-paid — bounded to one file. Uses whatever provider key the
+            // user has saved (OpenRouter / Anthropic / OpenAI / Gemini).
             const keyRecord = await keyPromise;
             if (!keyRecord) {
-              write("No OpenRouter key is configured. Add your key in Settings → AI Providers, then confirm again.");
+              write("No AI provider key is configured. Add one in Settings → AI Providers (OpenRouter, Anthropic, OpenAI, or Gemini), then try again.");
               return;
             }
             let paidApiKey: string;
             try {
               paidApiKey = decryptKey(keyRecord.encryptedKey);
             } catch {
-              write("Your OpenRouter key couldn't be decrypted. Re-save it in Settings → AI Providers.");
+              write("Your AI provider key couldn't be decrypted. Re-save it in Settings → AI Providers.");
               return;
             }
-            if (!paidApiKey.startsWith(OPENROUTER_KEY_PREFIX)) {
-              write("Your OpenRouter key format looks invalid (expected sk-or-…). Check Settings → AI Providers.");
-              return;
-            }
+            const paidProvider = keyRecord.provider as "openrouter" | "anthropic" | "openai" | "gemini";
 
             const displayName = orchestration.agentId.charAt(0).toUpperCase() + orchestration.agentId.slice(1);
 
@@ -1462,7 +1561,7 @@ export async function POST(request: Request) {
               branch:      oBranch,
               githubToken: orchToken,
               aiConfig: {
-                provider: "openrouter" as const,
+                provider: paidProvider,
                 apiKey:   paidApiKey,
                 model:    keyRecord.model ?? undefined,
               },
@@ -1830,33 +1929,35 @@ export async function POST(request: Request) {
         if (signal.aborted) return;
 
         if (record) {
-          // ── 5d. Decrypt and validate the OpenRouter key ─────
-          // (may already be decrypted above for reference pipeline — fine to decrypt again,
-          // decryptKey() is pure/fast and doesn't cache; avoids passing apiKey across scope)
-          console.log(`[orchestrate] key_loaded record_found=true`);
+          // ── 5d. Decrypt + validate the AI provider key ──────
+          // Provider comes from the saved key record. Hard-coded OpenRouter
+          // checks (prefix, "OpenRouter key" wording) used to break the moment
+          // a user saved a Gemini/OpenAI/Anthropic key instead.
+          const streamProvider = (record.provider as StreamProvider) || "openrouter";
+          console.log(`[orchestrate] key_loaded provider=${streamProvider}`);
           let apiKey: string;
           try {
             apiKey = decryptKey(record.encryptedKey);
             console.log(`[orchestrate] key_decrypted length=${apiKey.length}`);
           } catch (err) {
             console.log(`[orchestrate] stream_error reason=decrypt_failed err=${err instanceof Error ? err.message : "unknown"}`);
-            write("OpenRouter key decryption failed. Re-save your API key in Settings → AI Providers.");
+            write(`${streamProvider} key decryption failed. Re-save your API key in Settings → AI Providers.`);
             return;
           }
 
           if (!apiKey || apiKey.trim().length === 0) {
             console.log(`[orchestrate] stream_error reason=key_empty`);
-            write("OpenRouter API key is empty. Re-save your key in Settings → AI Providers.");
+            write(`${streamProvider} API key is empty. Re-save your key in Settings → AI Providers.`);
             return;
           }
 
-          if (!apiKey.startsWith(OPENROUTER_KEY_PREFIX)) {
+          if (streamProvider === "openrouter" && !apiKey.startsWith(OPENROUTER_KEY_PREFIX)) {
             console.log(`[orchestrate] stream_error reason=key_invalid_format prefix=${apiKey.slice(0, 6)}`);
             write("OpenRouter API key format is invalid (expected sk-or-…). Check Settings → AI Providers.");
             return;
           }
 
-          console.log(`[orchestrate] key_validated prefix=${apiKey.slice(0, 12)}…`);
+          console.log(`[orchestrate] key_validated provider=${streamProvider} prefix=${apiKey.slice(0, 8)}…`);
 
           // ── 5e. Two-stage provider timeout ──────────────────
           //
@@ -1890,9 +1991,9 @@ export async function POST(request: Request) {
             }
           }, 1_000) as unknown as ReturnType<typeof setTimeout>;
 
-          // ── 5f. Stream from OpenRouter ──────────────────────
+          // ── 5f. Stream from the user's chosen provider ─────
           try {
-            for await (const chunk of streamOpenRouter(apiKey, systemPrompt, messages, signal)) {
+            for await (const chunk of streamFromProvider(streamProvider, apiKey, record.model, systemPrompt, messages, signal)) {
               // Clear first-token timeout on first arrival — model is responding
               if (!firstTokenReceived) {
                 firstTokenReceived = true;
@@ -1917,7 +2018,7 @@ export async function POST(request: Request) {
           // ── 5g. Touch lastUsedAt — fire and forget ───────────
           prisma.userProviderKey
             .updateMany({
-              where: { user: { clerkId }, provider: "openrouter" },
+              where: { user: { clerkId }, provider: streamProvider },
               data:  { lastUsedAt: new Date() }
             })
             .catch(() => null);
@@ -1930,8 +2031,8 @@ export async function POST(request: Request) {
             "Wait a few seconds and try again. If this persists, check your DATABASE_URL."
           );
         } else {
-          // ── No key configured ─────────────────────────────────
-          console.log(`[orchestrate] no_openrouter_key_found`);
+          // ── No key configured (any provider) ──────────────────
+          console.log(`[orchestrate] no_provider_key_found`);
           if (process.env.NODE_ENV === "development") {
             console.log(`[orchestrate] dev_mock_pipeline_start`);
             for await (const chunk of streamMock(repositoryContext, message, signal)) {
@@ -1939,8 +2040,8 @@ export async function POST(request: Request) {
             }
           } else {
             write(
-              "OpenRouter API key not configured. " +
-              "Add your key in Settings → AI Providers to enable live responses."
+              "No AI provider key is configured. " +
+              "Add a key in Settings → AI Providers — OpenRouter, OpenAI, Anthropic, or Google Gemini all work."
             );
           }
         }
