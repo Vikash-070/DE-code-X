@@ -31,7 +31,7 @@ import type { CipherFinding, AgentId, AgentResult } from "@/types/intelligence";
 // ─── Types ────────────────────────────────────────────────────
 
 type ProviderConfig = {
-  provider: "anthropic" | "openai" | "openrouter";
+  provider: "anthropic" | "openai" | "openrouter" | "gemini";
   apiKey:   string;
   model?:   string;
 };
@@ -88,6 +88,9 @@ Return a JSON array of findings. Return [] if nothing notable.`;
   } else if (config.provider === "openai") {
     const { runOpenAICompletion } = await import("@/server/ai/providers/openai");
     raw = await runOpenAICompletion(config.apiKey, userPrompt, opts);
+  } else if (config.provider === "gemini") {
+    const { runGeminiCompletion } = await import("@/server/ai/providers/gemini");
+    raw = await runGeminiCompletion(config.apiKey, userPrompt, opts);
   } else {
     const { runOpenRouterCompletion } = await import("@/server/ai/providers/openrouter");
     raw = await runOpenRouterCompletion(config.apiKey, userPrompt, opts);

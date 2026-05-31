@@ -135,7 +135,7 @@ export interface SentinelAnalyzeParams {
   branch:      string;
   githubToken: string;
   aiConfig: {
-    provider: "anthropic" | "openai" | "openrouter";
+    provider: "anthropic" | "openai" | "openrouter" | "gemini";
     apiKey:   string;
     model?:   string;
   };

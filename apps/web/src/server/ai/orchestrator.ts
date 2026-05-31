@@ -19,8 +19,9 @@ import {
 import { runAnthropicCompletion, type AnthropicModel } from "./providers/anthropic";
 import { runOpenAICompletion, type OpenAIModel }       from "./providers/openai";
 import { runOpenRouterCompletion, type OpenRouterModel } from "./providers/openrouter";
+import { runGeminiCompletion, type GeminiModel }       from "./providers/gemini";
 
-export type AIProvider = "anthropic" | "openai" | "openrouter";
+export type AIProvider = "anthropic" | "openai" | "openrouter" | "gemini";
 
 export interface OrchestratorConfig {
   provider: AIProvider;
@@ -80,6 +81,13 @@ async function callAgent(
       raw = await runOpenRouterCompletion(config.apiKey, userPrompt, {
         system:      systemPrompt,
         model:       config.model as OpenRouterModel | undefined,
+        temperature: 0.1
+      });
+      break;
+    case "gemini":
+      raw = await runGeminiCompletion(config.apiKey, userPrompt, {
+        system:      systemPrompt,
+        model:       config.model as GeminiModel | undefined,
         temperature: 0.1
       });
       break;

@@ -92,7 +92,7 @@ export async function POST(request: Request): Promise<Response> {
       branch:      branch.trim(),
       githubToken,
       aiConfig: {
-        provider: providerKey.provider as "anthropic" | "openai" | "openrouter",
+        provider: providerKey.provider as "anthropic" | "openai" | "openrouter" | "gemini",
         apiKey,
         model:    providerKey.model ?? undefined,
       },

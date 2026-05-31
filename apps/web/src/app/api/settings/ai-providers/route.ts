@@ -17,6 +17,9 @@ import { NextResponse } from "next/server";
 import { prisma }              from "@/lib/prisma";
 import { encryptKey, redactKey } from "@/server/ai/encryption";
 import { testOpenRouterKey }   from "@/server/ai/providers/openrouter";
+import { testAnthropicKey }    from "@/server/ai/providers/anthropic";
+import { testOpenAIKey }       from "@/server/ai/providers/openai";
+import { testGeminiKey, GEMINI_KEY_PREFIX } from "@/server/ai/providers/gemini";
 import {
   classifyPrismaError,
   withRetry,
@@ -27,10 +30,9 @@ import {
 // so we give slightly more headroom than the orchestrate route).
 const DB_TIMEOUT_MS = 6_000;
 
-// Only OpenRouter is active. Anthropic and OpenAI listed for UI completeness
-// but the connection test only runs for openrouter.
-type Provider = "anthropic" | "openrouter" | "openai";
-const VALID_PROVIDERS: Provider[] = ["anthropic", "openrouter", "openai"];
+// All four providers are active and connection-tested on save.
+type Provider = "anthropic" | "openrouter" | "openai" | "gemini";
+const VALID_PROVIDERS: Provider[] = ["anthropic", "openrouter", "openai", "gemini"];
 
 async function resolveUserId(clerkId: string): Promise<string | null> {
   const user = await prisma.user.findUnique({ where: { clerkId }, select: { id: true } });
@@ -107,7 +109,7 @@ export async function POST(request: Request) {
 
   const trimmedKey = apiKey.trim();
 
-  // Key format validation for OpenRouter
+  // Key format validation — provider-specific prefixes catch typos early.
   if (provider === "openrouter" && !trimmedKey.startsWith("sk-or-")) {
     console.log(`[provider-save] invalid_key_format provider=openrouter prefix=${trimmedKey.slice(0, 6)}`);
     return NextResponse.json(
@@ -115,22 +117,43 @@ export async function POST(request: Request) {
       { status: 422 }
     );
   }
+  if (provider === "gemini" && !trimmedKey.startsWith(GEMINI_KEY_PREFIX)) {
+    console.log(`[provider-save] invalid_key_format provider=gemini prefix=${trimmedKey.slice(0, 4)}`);
+    return NextResponse.json(
+      { error: "Gemini keys must start with AIza. Get yours at aistudio.google.com/apikey" },
+      { status: 422 }
+    );
+  }
+  if (provider === "anthropic" && !trimmedKey.startsWith("sk-ant-")) {
+    console.log(`[provider-save] invalid_key_format provider=anthropic prefix=${trimmedKey.slice(0, 6)}`);
+    return NextResponse.json(
+      { error: "Anthropic keys must start with sk-ant-. Get yours at console.anthropic.com/account/keys" },
+      { status: 422 }
+    );
+  }
+  if (provider === "openai" && !trimmedKey.startsWith("sk-")) {
+    console.log(`[provider-save] invalid_key_format provider=openai prefix=${trimmedKey.slice(0, 3)}`);
+    return NextResponse.json(
+      { error: "OpenAI keys must start with sk-. Get yours at platform.openai.com/api-keys" },
+      { status: 422 }
+    );
+  }
 
   // Lightweight connection test — uses a minimal ping call, NOT the full pipeline.
-  // Only supported for OpenRouter currently.
-  if (testConnection && provider === "openrouter") {
-    console.log(`[provider-save] connection_test_start provider=openrouter`);
+  // Optional connection test — every provider supports it.
+  if (testConnection) {
+    console.log(`[provider-save] connection_test_start provider=${provider}`);
     try {
-      await testOpenRouterKey(trimmedKey);
-      console.log(`[provider-save] connection_test_passed provider=openrouter elapsed=${Date.now() - t0}ms`);
+      if (provider === "openrouter")     await testOpenRouterKey(trimmedKey);
+      else if (provider === "anthropic") await testAnthropicKey(trimmedKey);
+      else if (provider === "openai")    await testOpenAIKey(trimmedKey);
+      else if (provider === "gemini")    await testGeminiKey(trimmedKey);
+      console.log(`[provider-save] connection_test_passed provider=${provider} elapsed=${Date.now() - t0}ms`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      console.log(`[provider-save] connection_test_failed provider=openrouter err=${msg}`);
+      console.log(`[provider-save] connection_test_failed provider=${provider} err=${msg}`);
       return NextResponse.json({ error: `Connection test failed: ${msg}` }, { status: 422 });
     }
-  } else if (testConnection) {
-    // For Anthropic/OpenAI we skip the test (not active providers) but still save
-    console.log(`[provider-save] connection_test_skipped provider=${provider} (not active)`);
   }
 
   // Resolve or create the User record

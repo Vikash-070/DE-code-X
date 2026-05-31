@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
 
 // ─── Types ────────────────────────────────────────────────
 
-type Provider = "anthropic" | "openrouter" | "openai";
+type Provider = "anthropic" | "openrouter" | "openai" | "gemini";
 
 interface ConfiguredProvider {
   provider: Provider;
@@ -75,6 +75,21 @@ const PROVIDERS: ProviderMeta[] = [
     models:  [
       { value: "gpt-4o-mini", label: "GPT-4o Mini — fast, low cost" },
       { value: "gpt-4o",      label: "GPT-4o — high capability"      }
+    ]
+  },
+  {
+    id:      "gemini",
+    label:   "Google Gemini",
+    detail:  "Gemini 2.5 Flash & Pro. Free tier available — great for cost-sensitive analysis.",
+    keyHint: "AIza…",
+    docsUrl: "https://aistudio.google.com/apikey",
+    models:  [
+      { value: "gemini-2.5-flash",       label: "Gemini 2.5 Flash — recommended, fast + cheap" },
+      { value: "gemini-2.5-flash-lite",  label: "Gemini 2.5 Flash Lite — cheapest"             },
+      { value: "gemini-2.5-pro",         label: "Gemini 2.5 Pro — maximum capability"          },
+      { value: "gemini-2.0-flash",       label: "Gemini 2.0 Flash"                             },
+      { value: "gemini-1.5-pro",         label: "Gemini 1.5 Pro (legacy)"                      },
+      { value: "gemini-1.5-flash",       label: "Gemini 1.5 Flash (legacy)"                    }
     ]
   }
 ];
