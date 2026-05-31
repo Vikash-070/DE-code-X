@@ -117,13 +117,11 @@ export async function POST(request: Request) {
       { status: 422 }
     );
   }
-  if (provider === "gemini" && !trimmedKey.startsWith(GEMINI_KEY_PREFIX)) {
-    console.log(`[provider-save] invalid_key_format provider=gemini prefix=${trimmedKey.slice(0, 4)}`);
-    return NextResponse.json(
-      { error: "Gemini keys must start with AIza. Get yours at aistudio.google.com/apikey" },
-      { status: 422 }
-    );
-  }
+  // Gemini keys don't have a single canonical prefix — AI Studio keys start
+  // with "AIza" but other Google products (Vertex, workspace-issued credentials)
+  // use different prefixes. We skip the prefix check and let the connection
+  // test be the source of truth.
+  void GEMINI_KEY_PREFIX;
   if (provider === "anthropic" && !trimmedKey.startsWith("sk-ant-")) {
     console.log(`[provider-save] invalid_key_format provider=anthropic prefix=${trimmedKey.slice(0, 6)}`);
     return NextResponse.json(

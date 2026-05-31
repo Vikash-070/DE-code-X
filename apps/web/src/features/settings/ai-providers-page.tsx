@@ -81,7 +81,7 @@ const PROVIDERS: ProviderMeta[] = [
     id:      "gemini",
     label:   "Google Gemini",
     detail:  "Gemini 2.5 Flash & Pro. Free tier available — great for cost-sensitive analysis.",
-    keyHint: "AIza…",
+    keyHint: "AIza… or AQ.…",
     docsUrl: "https://aistudio.google.com/apikey",
     models:  [
       { value: "gemini-2.5-flash",       label: "Gemini 2.5 Flash — recommended, fast + cheap" },
